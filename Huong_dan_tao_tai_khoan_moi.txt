@@ -1,0 +1,41 @@
+HƯỚNG DẪN TỰ TẠO TÀI KHOẢN MỚI (đăng nhập bằng số điện thoại)
+================================================================
+
+Mỗi khi cần tạo tài khoản mới cho 1 người:
+
+1. Vào Supabase Dashboard > Edge Functions > create-user-by-phone > tab "Test"
+2. HTTP Method: POST
+3. Ở phần Headers, thêm:
+   Tên header:  x-admin-secret
+   Giá trị:     lrjkJceZyRIgEwuD1oKbUHFC
+
+4. Ở phần Request Body, xoá hết nội dung cũ, dán đoạn này vào rồi SỬA LẠI
+   đúng 5 chỗ có gạch dưới (họ tên, SĐT, mật khẩu, phòng ban, vai trò):
+
+{
+  "fullName": "Nguyễn Văn A",
+  "phone": "0912345678",
+  "password": "0912345678",
+  "department": "QC",
+  "role": "qc"
+}
+
+   Ghi chú:
+   - password: mật khẩu ban đầu, nên đặt = chính số điện thoại cho dễ nhớ
+     (người dùng tự đổi lại sau ở mục "Tài khoản của tôi" trong web app)
+   - department và role: chọn 1 trong RD / QA / QC / KH (viết thường cho role:
+     rd/qa/qc/kh). Nếu là admin hoặc kỹ thuật viên thì role = admin hoặc ktv.
+
+5. Bấm nút "Send Request"
+   - Thấy chữ "ok": true  => THÀNH CÔNG, người đó đăng nhập được ngay bằng
+     SĐT + mật khẩu vừa đặt.
+   - Thấy chữ "error": "Số điện thoại đã có tài khoản..." => SĐT này đã có
+     tài khoản rồi, không cần tạo lại.
+   - Thấy lỗi khác lạ => chụp màn hình gửi lại cho Claude để kiểm tra giúp.
+
+LƯU Ý:
+- Tên header PHẢI là "x-admin-secret" (không phải "ADMIN_CREATE_SECRET" —
+  đó là tên khác, dễ gõ nhầm).
+- Đây là việc tạo tài khoản MỚI. Muốn đổi mật khẩu cho tài khoản ĐÃ CÓ thì
+  làm khác (chạy lệnh admin_reset_password trong SQL Editor) — không dùng
+  hướng dẫn này.
