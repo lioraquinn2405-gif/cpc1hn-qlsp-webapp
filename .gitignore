@@ -10,3 +10,7 @@ scripts/_shot-debug-*.png
 
 # Dữ liệu thật xuất từ SQLite của hệ cũ khi gộp "Cảnh báo lên men" — chỉ dùng tại máy
 lenmen-export.json
+
+# Script tạm nối thẳng Postgres khi gộp dữ liệu (đọc chuỗi kết nối ngoài repo)
+_pgrun.mjs
+_pgimport.mjs

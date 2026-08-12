@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 
 // File này là ESM nên không có require sẵn — node:sqlite chỉ nạp khi thật sự cần
 // (nguồn là .db), và phải nạp kiểu này để bắt được lỗi khi Node quá cũ.
@@ -73,11 +74,11 @@ function readSource(src) {
 /* Chuyển đổi                                                                  */
 /* -------------------------------------------------------------------------- */
 
-const PREP_STATUS = new Set(["Chờ lên men", "Chờ pha", "Chờ hủy", "Đã xử lý"]);
+export const PREP_STATUS = new Set(["Chờ lên men", "Chờ pha", "Chờ hủy", "Đã xử lý"]);
 
 // SQLite lưu "YYYY-MM-DD HH:MM:SS" theo giờ UTC (datetime('now')); thêm Z để Postgres
 // không hiểu nhầm là giờ địa phương rồi lệch 7 tiếng.
-function toTimestamp(s) {
+export function toTimestamp(s) {
   if (!s) return null;
   const t = String(s).trim();
   if (!t) return null;
@@ -86,7 +87,7 @@ function toTimestamp(s) {
 
 // qc_details/density_details là chuỗi JSON trong SQLite, cột jsonb bên Postgres cần object.
 // Lô cũ có thể chứa chuỗi hỏng — bỏ qua thay vì làm hỏng cả lần nhập.
-function toJson(v, label, lot, warnings) {
+export function toJson(v, label, lot, warnings) {
   if (v == null || v === "") return null;
   if (typeof v === "object") return v;
   try {
@@ -97,7 +98,7 @@ function toJson(v, label, lot, warnings) {
   }
 }
 
-function mapBatch(r, warnings) {
+export function mapBatch(r, warnings) {
   const status = (r.prep_status || "").trim();
   if (status && !PREP_STATUS.has(status)) {
     warnings.push("Lô " + r.lot_number + ": trạng thái lạ \"" + status + "\", đã để trống");
@@ -125,7 +126,7 @@ function mapBatch(r, warnings) {
   };
 }
 
-function mapKhsx(r) {
+export function mapKhsx(r) {
   return {
     week_start: r.week_start,
     row_key: r.row_key,
@@ -140,7 +141,7 @@ function mapKhsx(r) {
 // Chỉ mang sang cài đặt đặc thù của lên men. Tài khoản/phân quyền đã có ở tab "Người dùng"
 // của trang lớn nên bỏ; *_last_sent giữ lại để Apps Script không gửi trùng mail ngay sau
 // khi chuyển. Khoá không nằm trong danh sách này sẽ bị bỏ qua và báo ra cuối.
-const SETTING_KEYS = new Set([
+export const SETTING_KEYS = new Set([
   "density_cutoff_month", "density_cutoff_year", "density_chai_per_1000l",
   "density_unit_volume", "density_unit_density",
   "density_formula_bh1_mult", "density_formula_bh1_d1", "density_formula_bh1_d2",
@@ -221,4 +222,5 @@ async function main() {
   }
 }
 
-main();
+// Chỉ chạy khi gọi trực tiếp — file này còn được import để dùng lại phần ánh xạ.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main();
