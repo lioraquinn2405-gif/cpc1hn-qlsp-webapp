@@ -4,7 +4,10 @@ import {
   Plus, Trash2, ChevronRight, ChevronDown, ChevronUp, Droplets, Loader2, Ban, LogOut, X, RotateCcw,
   Calculator, XCircle, HelpCircle, Settings, Mail, KeyRound, GripVertical, Factory, Sparkles, TrendingUp, Menu,
   Search,
+  ShieldAlert, Snowflake,
 } from "lucide-react";
+import LenMenPanel from "./LenMenPanel.jsx";
+import SeedLotPanel from "./SeedLotPanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabaseClient.js";
 import {
   fetchMaterials, fetchProducts, updateMaterialField, updateMaterialFields, removeMaterial,
@@ -34,6 +37,15 @@ const STATUS_LABEL = {
 const STRAIN_OPTIONS = [
   { value: "subtilis", label: "Bacillus subtilis" },
   { value: "clausii", label: "Bacillus clausii" },
+];
+
+// Các mục con của "Cảnh báo lên men" (xem LenMenPanel.jsx). Khoá đều mang tiền tố
+// lenmen- để phân biệt rõ với các tab của phần pha chế.
+const LENMEN_TABS = [
+  { key: "lenmen-batches", label: "Danh sách lô" },
+  { key: "lenmen-density", label: "Định lượng mật độ" },
+  { key: "lenmen-khsx", label: "Kế hoạch sản xuất" },
+  { key: "lenmen-overview", label: "Tổng quan" },
 ];
 
 const POOL_LABEL = {
@@ -874,6 +886,8 @@ function Connected({ session, profile }) {
               {tab === "sp" && <ProductPanel products={products} setProducts={setProducts} setNote={setNote} isAdmin={isAdmin} canEdit={canEditProduction} />}
               {tab === "sp-history" && <ProductionHistoryPanel products={products} setNote={setNote} focusMaSP={spFocus?.maSP} focusTs={spFocus?.ts} canEdit={canEditProduction} />}
               {tab === "xu-huong-nl" && <NLTrendPanel materials={materials} actorId={actorId} setNote={setNote} />}
+              {LENMEN_TABS.some((t) => t.key === tab) && <LenMenPanel tab={tab} />}
+              {tab === "giong" && <SeedLotPanel />}
               {tab === "users" && isAdmin && <UsersPanel profiles={profiles} onUpdate={updateUserProfile} currentUserId={actorId} onCreated={reload} />}
               {tab === "account" && <AccountSettingsPanel session={session} profile={profile} />}
             </>
@@ -890,10 +904,12 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strain
   const [nlOpen, setNlOpen] = useState(true);
   const [phaOpen, setPhaOpen] = useState(true);
   const [spOpen, setSpOpen] = useState(true);
+  const [lenMenOpen, setLenMenOpen] = useState(true);
   const [manualOpen, setManualOpen] = useState({});
   const isPhaTab = tab === "pha" || tab === "ke-hoach" || tab === "cho-sx";
   const isNlTab = NL_TABS.some((t) => t.key === tab) || tab === "cho-xoa" || tab === "xu-huong-nl";
   const isSpTab = tab === "sp" || tab === "sp-history";
+  const isLenMenTab = LENMEN_TABS.some((t) => t.key === tab);
   const SIDEBAR_BG = "#28374a";
   const ACTIVE_TEXT = "#28374a";
   const isStatusOpen = (key) => (manualOpen[key] !== undefined ? manualOpen[key] : tab === key);
@@ -1039,6 +1055,28 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strain
             </button>
           </div>
         )}
+        {/* Cảnh báo lên men — công đoạn TRƯỚC nguyên liệu (thu bào tử), gộp từ app chạy riêng
+            trước đây. Đặt dưới "Sản phẩm" theo đúng thứ tự quy trình. */}
+        <button onClick={() => setLenMenOpen((o) => !o)}
+          className={`w-full flex items-center gap-2 px-4 py-2.5 hover:bg-white/10 transition ${isLenMenTab ? "bg-white/10 font-medium" : ""}`}>
+          <ShieldAlert className="w-4 h-4 shrink-0" />
+          <span className="flex-1 text-left">Cảnh báo lên men</span>
+          {lenMenOpen ? <ChevronDown className="w-3.5 h-3.5 text-amber-400" /> : <ChevronRight className="w-3.5 h-3.5 text-amber-400" />}
+        </button>
+        {lenMenOpen && (
+          <div className="mx-2 my-1 py-1 rounded-md bg-black/15">
+            {LENMEN_TABS.map((t) => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === t.key ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
+                style={tab === t.key ? { color: ACTIVE_TEXT } : undefined}>
+                <span className="flex-1 text-left">{t.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {/* Bảo quản chủng giống — sổ lô ống chủng + theo dõi độ ổn định, thay file Excel
+            "File tổng SỐ LÔ". Là menu riêng, không nằm trong Cảnh báo lên men. */}
+        <SidebarLink active={tab === "giong"} icon={Snowflake} activeText={ACTIVE_TEXT} onClick={() => setTab("giong")}>Bảo quản chủng giống</SidebarLink>
         {isAdmin && <SidebarLink active={tab === "users"} icon={Users} activeText={ACTIVE_TEXT} onClick={() => setTab("users")}>Người dùng</SidebarLink>}
       </nav>
       <div className="border-t border-white/10 px-4 py-3 flex items-center gap-2">
@@ -1083,6 +1121,9 @@ function Breadcrumb({ tab, focusMaSP, products }) {
     : tab === "sp-history" ? (focusedProduct
         ? ["Trang chủ", "Sản phẩm", "Lịch sử pha chế", `${focusedProduct.maSP} · ${focusedProduct.tenSP}`]
         : ["Trang chủ", "Sản phẩm", "Lịch sử pha chế"])
+    : LENMEN_TABS.some((t) => t.key === tab)
+        ? ["Trang chủ", "Cảnh báo lên men", LENMEN_TABS.find((t) => t.key === tab).label]
+    : tab === "giong" ? ["Trang chủ", "Bảo quản chủng giống"]
     : tab === "users" ? ["Trang chủ", "Người dùng"]
     : tab === "account" ? ["Trang chủ", "Tài khoản của tôi"]
     : ["Trang chủ", "Sản phẩm"];

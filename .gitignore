@@ -7,3 +7,6 @@ dist
 *.log
 *.xlsx
 scripts/_shot-debug-*.png
+
+# Dữ liệu thật xuất từ SQLite của hệ cũ khi gộp "Cảnh báo lên men" — chỉ dùng tại máy
+lenmen-export.json
