@@ -80,14 +80,8 @@ export async function reviewMixPlanWithAi(planSummary) {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
     body: JSON.stringify({ planSummary }),
   });
-  const rawText = await res.text();
-  let body;
-  try { body = JSON.parse(rawText); } catch { body = {}; }
-  // Chưa xác định được nguyên nhân lỗi thật (báo NCV 2026-08-10, server luôn trả JSON hợp lệ khi
-  // tự test trực tiếp) — tạm in kèm mã HTTP + đoạn đầu nội dung thô để biết chính xác đang nhận về
-  // cái gì (server lỗi không phải JSON? bị chặn ở tầng khác trước khi tới server?), XOÁ SAU KHI
-  // xác định xong nguyên nhân, đừng để lại vĩnh viễn.
-  if (!res.ok) throw new Error(body.error || `Không rà soát được (HTTP ${res.status}, phản hồi: ${rawText.slice(0, 200) || "(rỗng)"})`);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "Không rà soát được.");
   return body.explanation;
 }
 

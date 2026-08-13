@@ -3,6 +3,7 @@ import {
   PackageOpen, AlertTriangle, CheckCircle2, Beaker, Boxes, Users, FlaskConical,
   Plus, Trash2, ChevronRight, ChevronDown, ChevronUp, Droplets, Loader2, Ban, LogOut, X, RotateCcw,
   Calculator, XCircle, HelpCircle, Settings, Mail, KeyRound, GripVertical, Factory, Sparkles, TrendingUp, Menu,
+  Search,
 } from "lucide-react";
 import { supabase, supabaseConfigured } from "./lib/supabaseClient.js";
 import {
@@ -549,6 +550,14 @@ function Connected({ session, profile }) {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("cho-pha");
   const [strainFilter, setStrainFilter] = useState("all");
+  // Bộ lọc bảng NL (áp dụng cho mọi tab NL: Chờ KQKN/Chờ pha/Chờ xử lý/Đã pha/Đã huỷ/Thùng rác) —
+  // tách riêng khỏi strainFilter (vốn ở Sidebar, không đổi khi chuyển tab) vì đây là lọc trong
+  // phạm vi 1 tab, không cần nhớ lại khi chuyển tab khác.
+  const [loQuery, setLoQuery] = useState("");
+  const [statusTagFilter, setStatusTagFilter] = useState("all");
+  const [dateField, setDateField] = useState("thoiGianThu");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [note, setNote] = useState("");
   // Sidebar trên điện thoại (màn hẹp hơn breakpoint sm) ẩn mặc định, mở dạng overlay có nút menu
   // riêng — sidebar cố định 240px như cũ chỉ áp dụng từ sm trở lên (xem <Sidebar>/<aside>). Tự đóng
@@ -745,9 +754,51 @@ function Connected({ session, profile }) {
     return c;
   }, [materials]);
 
+  // Khớp lô sản xuất (vd "26G02SA1") hoặc đúng 1 chai (gõ thêm ".C1", chỉ cần chứa trong soLo,
+  // không cần gõ đủ cả mã lô — vd gõ ".c3" là ra ngay chai C3 của mọi lô).
+  const matchesLoQuery = (r) => {
+    const q = loQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (r.lo || "").toLowerCase().includes(q) || (r.soLo || "").toLowerCase().includes(q);
+  };
+  const matchesStatusTag = (r) => {
+    if (statusTagFilter === "all") return true;
+    const st = statusOf(r);
+    switch (statusTagFilter) {
+      case "loai1": return st.loai === 1;
+      case "loai2": return st.loai === 2;
+      case "het-han": return !!st.expired;
+      case "gan-het-han": return !!st.nearExpiry;
+      case "qua-han-qc": return st.status === "cho-kqkn" && st.qcDays != null && st.qcDays >= QC_DEADLINE_DAYS;
+      case "thieu-du-lieu": return !!(st.needsNhiemConNao || st.needsGhiChu || st.chuaQC);
+      default: return true;
+    }
+  };
+  // "Ngày thu mẫu" (thoiGianThu) so YYYY-MM-DD; "Đợt SX" (dotSanXuat, dạng M/YYYY) chỉ có độ phân
+  // giải tháng nên quy về "YYYY-MM" trước khi so — cả 2 dạng chuỗi đều so trực tiếp được theo thứ
+  // tự thời gian (không cần parse ra số).
+  const dateKeyOf = (r) => {
+    if (dateField === "thoiGianThu") return r.thoiGianThu || null;
+    const d = parseDotSanXuat(r.dotSanXuat);
+    return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` : null;
+  };
+  const matchesDateRange = (r) => {
+    if (!dateFrom && !dateTo) return true;
+    const key = dateKeyOf(r);
+    if (!key) return false;
+    if (dateFrom && key < dateFrom) return false;
+    if (dateTo && key > dateTo) return false;
+    return true;
+  };
+  const hasActiveFilter = !!loQuery.trim() || statusTagFilter !== "all" || !!dateFrom || !!dateTo;
+  const resetFilters = () => { setLoQuery(""); setStatusTagFilter("all"); setDateFrom(""); setDateTo(""); };
+
   const filtered = (status) => materials
     .filter((r) => statusOf(r).status === status)
-    .filter((r) => status === "cho-xoa" || strainFilter === "all" || r.strain === strainFilter);
+    .filter((r) => status === "cho-xoa" || strainFilter === "all" || r.strain === strainFilter)
+    .filter(matchesLoQuery)
+    .filter(matchesStatusTag)
+    .filter(matchesDateRange);
 
   // Đo chiều cao thanh sticky trên cùng (breadcrumb + subtitle + note nếu có) để các panel con (vd
   // header "Sửa tay kế hoạch") có thể tự dán dính NGAY DƯỚI nó khi cuộn, không bị đè lên nhau — chiều
@@ -769,8 +820,7 @@ function Connected({ session, profile }) {
         <div className="fixed inset-0 bg-black/40 z-30 sm:hidden" onClick={() => setMobileNavOpen(false)} />
       )}
       <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin}
-        strainFilter={strainFilter} setStrainFilter={setStrainFilter} products={products} focusMaSP={spFocus?.maSP}
-        onSelectProduct={(maSP) => { setSpFocus({ maSP, ts: Date.now() }); setTab("sp-history"); }}
+        strainFilter={strainFilter} setStrainFilter={setStrainFilter}
         onOpenHistoryAll={() => { setSpFocus(null); setTab("sp-history"); }}
         mobileOpen={mobileNavOpen} />
 
@@ -799,12 +849,23 @@ function Connected({ session, profile }) {
           ) : (
             <>
               {tab === "cho-kqkn" && canEditNL && <AddLotForm onAdd={addLot} />}
-              {(tab === "cho-pha" || tab === "cho-kqkn" || tab === "cho-xu-ly" || tab === "da-pha" || tab === "da-huy" || tab === "cho-xoa") && (
-                <MaterialTable rows={filtered(tab)} status={tab} onEdit={editField} onRemove={removeRec}
-                  onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
-                  canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
-                  onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} />
-              )}
+              {(tab === "cho-pha" || tab === "cho-kqkn" || tab === "cho-xu-ly" || tab === "da-pha" || tab === "da-huy" || tab === "cho-xoa") && (() => {
+                const rows = filtered(tab);
+                return (
+                  <>
+                    <NLFilterBar loQuery={loQuery} setLoQuery={setLoQuery}
+                      statusTagFilter={statusTagFilter} setStatusTagFilter={setStatusTagFilter}
+                      dateField={dateField} setDateField={setDateField}
+                      dateFrom={dateFrom} setDateFrom={setDateFrom} dateTo={dateTo} setDateTo={setDateTo}
+                      hasActiveFilter={hasActiveFilter} onReset={resetFilters}
+                      resultCount={rows.length} />
+                    <MaterialTable rows={rows} status={tab} onEdit={editField} onRemove={removeRec}
+                      onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
+                      canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
+                      onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} />
+                  </>
+                );
+              })()}
               {/* Chờ SX nằm trong mục "Pha chế", không có bộ lọc theo chủng (subtilis/clausii) như
                   "Quản lý NL" — mỗi mẻ vốn đã gộp cả 2 chủng, lọc riêng từng chủng sẽ hiện mẻ thiếu. */}
               {tab === "cho-sx" && <ChoSXPanel choSxMaterials={materials.filter((r) => statusOf(r).status === "cho-sx")} allMaterials={materials} products={products} actorId={actorId} setNote={setNote} onConfirmed={goToProductionHistory} canEdit={canEditProduction} />}
@@ -824,7 +885,7 @@ function Connected({ session, profile }) {
 }
 
 /* ---------------- Sidebar ---------------- */
-function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strainFilter, setStrainFilter, products, focusMaSP, onSelectProduct, onOpenHistoryAll, mobileOpen }) {
+function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
   const displayEmail = userEmail;
   const [nlOpen, setNlOpen] = useState(true);
   const [phaOpen, setPhaOpen] = useState(true);
@@ -971,38 +1032,11 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strain
               style={tab === "sp" ? { color: ACTIVE_TEXT } : undefined}>
               <span className="flex-1 text-left">Danh mục</span>
             </button>
-            <div>
-              {(() => {
-                const headerActive = tab === "sp-history" && !focusMaSP;
-                const open = isStatusOpen("sp-history");
-                return (
-                  <>
-                    <button onClick={onOpenHistoryAll}
-                      className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${headerActive ? "bg-white font-medium" : tab === "sp-history" ? "bg-white/10 font-medium" : "text-white/85 hover:bg-white/10"}`}
-                      style={headerActive ? { color: ACTIVE_TEXT } : undefined}>
-                      <span className="flex-1 text-left">Lịch sử pha chế</span>
-                      <span onClick={(e) => { e.stopPropagation(); toggleStatus("sp-history"); }} className="p-0.5 -m-0.5 shrink-0">
-                        {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                      </span>
-                    </button>
-                    {open && (
-                      <div className="pb-1">
-                        {(products || []).map((p) => {
-                          const leafActive = tab === "sp-history" && focusMaSP === p.maSP;
-                          return (
-                            <button key={p.maSP} onClick={() => onSelectProduct(p.maSP)}
-                              className={`w-full flex items-center gap-2 pl-12 pr-3 py-1.5 text-[12px] transition rounded ${leafActive ? "bg-white font-medium" : "text-white/70 hover:bg-white/10"}`}
-                              style={leafActive ? { color: ACTIVE_TEXT } : undefined}>
-                              <span className="flex-1 text-left truncate">{p.maSP} · {p.tenSP}</span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
+            <button onClick={onOpenHistoryAll}
+              className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === "sp-history" ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
+              style={tab === "sp-history" ? { color: ACTIVE_TEXT } : undefined}>
+              <span className="flex-1 text-left">Lịch sử pha chế</span>
+            </button>
           </div>
         )}
         {isAdmin && <SidebarLink active={tab === "users"} icon={Users} activeText={ACTIVE_TEXT} onClick={() => setTab("users")}>Người dùng</SidebarLink>}
@@ -1196,13 +1230,13 @@ function ForceStatusSelect({ soLo, onDaPha, onChoXuLy, onDaHuy }) {
 }
 
 /* ---------------- Ô sửa nhanh ---------------- */
-function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur }) {
+function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur, title }) {
   // commitOnBlur: chỉ lưu (và do đó chỉ kích hoạt phân loại lại trạng thái, vd nhảy sang
   // "Chờ xử lý") lúc rời khỏi ô — không lưu theo từng ký tự như mặc định, tránh dòng bị
   // chuyển tab ngay giữa lúc còn đang gõ dở (vd Ghi chú bắt buộc trước khi chuyển Chờ xử lý).
   const [text, setText] = useState(v ?? "");
   useEffect(() => { setText(v ?? ""); }, [v]);
-  return <input value={commitOnBlur ? text : (v ?? "")} placeholder={ph} disabled={disabled}
+  return <input value={commitOnBlur ? text : (v ?? "")} placeholder={ph} disabled={disabled} title={title}
     onChange={(e) => { const val = e.target.value; commitOnBlur ? setText(val) : on(val); }}
     onBlur={commitOnBlur ? () => on(text) : undefined}
     className={`${w} text-xs border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-slate-50 disabled:text-slate-400 ${err ? "border-rose-400 bg-rose-50" : "border-slate-200"}`} />;
@@ -1233,6 +1267,66 @@ function EditNum({ v, on, w = "w-16" }) {
       onBlur={() => { focusedRef.current = false; setText(v ?? ""); }}
       className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 text-right focus:outline-none focus:ring-1 focus:ring-emerald-400`}
     />
+  );
+}
+
+/* ---------------- Bộ lọc bảng NL ---------------- */
+/** Thanh lọc dùng chung cho mọi tab NL (Chờ KQKN/Chờ pha/Chờ xử lý/Đã pha/Đã huỷ/Thùng rác) — lọc
+ * theo lô/chai (gõ ".C1" để ra đúng 1 chai), tình trạng (loại/cảnh báo), và khoảng thời gian (ngày
+ * thu mẫu hoặc đợt SX theo tháng). Đổi "Lọc theo" xoá luôn Từ/Đến vì định dạng ngày (date) và
+ * tháng (month) không tương thích nhau, giữ lại giá trị cũ sẽ so sánh sai. */
+function NLFilterBar({ loQuery, setLoQuery, statusTagFilter, setStatusTagFilter, dateField, setDateField, dateFrom, setDateFrom, dateTo, setDateTo, hasActiveFilter, onReset, resultCount }) {
+  const dateInputType = dateField === "thoiGianThu" ? "date" : "month";
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 p-3 mb-3 flex flex-wrap items-end gap-3 text-xs">
+      <div className="flex flex-col gap-1">
+        <label className="text-slate-500">Tìm theo lô/chai</label>
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 text-slate-300 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input value={loQuery} onChange={(e) => setLoQuery(e.target.value)}
+            placeholder="vd: 26G02SA1 hoặc .C1"
+            className="pl-7 pr-2 py-1.5 w-44 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        </div>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-slate-500">Tình trạng</label>
+        <select value={statusTagFilter} onChange={(e) => setStatusTagFilter(e.target.value)}
+          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400">
+          <option value="all">Tất cả</option>
+          <option value="loai1">Loại 1</option>
+          <option value="loai2">Loại 2</option>
+          <option value="het-han">Hết hạn</option>
+          <option value="gan-het-han">Sắp hết hạn</option>
+          <option value="qua-han-qc">Quá hạn trả KQ QC</option>
+          <option value="thieu-du-lieu">Thiếu dữ liệu QC</option>
+        </select>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-slate-500">Lọc thời gian theo</label>
+        <select value={dateField}
+          onChange={(e) => { setDateField(e.target.value); setDateFrom(""); setDateTo(""); }}
+          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400">
+          <option value="thoiGianThu">Ngày thu mẫu</option>
+          <option value="dotSanXuat">Đợt SX (tháng)</option>
+        </select>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-slate-500">Từ</label>
+        <input type={dateInputType} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="text-slate-500">Đến</label>
+        <input type={dateInputType} value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+      </div>
+      {hasActiveFilter && (
+        <button onClick={onReset} className="flex items-center gap-1 text-slate-500 hover:text-rose-600 py-1.5">
+          <X className="w-3.5 h-3.5" /> Xoá bộ lọc
+        </button>
+      )}
+      <span className="text-slate-400 ml-auto py-1.5">{resultCount} bản ghi khớp</span>
+    </div>
   );
 }
 
@@ -3725,6 +3819,13 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const cardRefs = useRef({});
+  // Bộ lọc: sản phẩm giờ chọn bằng dropdown trong trang này (trước đây là danh sách con ở
+  // Sidebar) + lọc thêm theo số lô và khoảng NSX/HSD — cùng kiểu với NLFilterBar ở bảng NL.
+  const [productFilter, setProductFilter] = useState(focusMaSP || "all");
+  const [loQuery, setLoQuery] = useState("");
+  const [dateField, setDateField] = useState("nsx");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -3735,10 +3836,11 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
   }, [setNote]);
   useEffect(() => { load(); }, [load]);
 
-  // Vừa "Xác nhận đã pha" xong -> tải lại (dòng mới chưa chắc đã kịp có trong lần fetch trước đó)
-  // rồi cuộn tới đúng ô sản phẩm đó.
+  // Vừa "Xác nhận đã pha" xong -> tải lại (dòng mới chưa chắc đã kịp có trong lần fetch trước đó),
+  // tự chọn đúng sản phẩm đó trong bộ lọc rồi cuộn tới.
   useEffect(() => {
     if (!focusMaSP) return;
+    setProductFilter(focusMaSP);
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusTs]);
@@ -3763,15 +3865,78 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
     return g;
   }, [batches]);
 
-  const visibleProducts = focusMaSP ? products.filter((p) => p.maSP === focusMaSP) : products;
+  // nsx/hsd đã là chuỗi ISO "YYYY-MM-DD" (input type=date) nên so trực tiếp bằng chuỗi được, không
+  // cần parse ra Date.
+  const matchesRow = (b) => {
+    const q = loQuery.trim().toLowerCase();
+    if (q && !(b.soLo || "").toLowerCase().includes(q)) return false;
+    if (dateFrom || dateTo) {
+      const key = b[dateField];
+      if (!key) return false;
+      if (dateFrom && key < dateFrom) return false;
+      if (dateTo && key > dateTo) return false;
+    }
+    return true;
+  };
+  const hasRowFilter = !!loQuery.trim() || !!dateFrom || !!dateTo;
+  const hasActiveFilter = productFilter !== "all" || hasRowFilter;
+  const resetFilters = () => { setProductFilter("all"); setLoQuery(""); setDateFrom(""); setDateTo(""); };
+
+  const visibleProducts = productFilter === "all" ? products : products.filter((p) => p.maSP === productFilter);
 
   if (loading) return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Đang tải…</div>;
-  if (!visibleProducts.length) return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Chưa có sản phẩm nào.</div>;
+  if (!products.length) return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Chưa có sản phẩm nào.</div>;
 
   return (
     <div className="space-y-3">
+      <div className="bg-white rounded-lg border border-slate-200 p-3 flex flex-wrap items-end gap-3 text-xs">
+        <div className="flex flex-col gap-1">
+          <label className="text-slate-500">Sản phẩm</label>
+          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400 max-w-[220px]">
+            <option value="all">Tất cả sản phẩm</option>
+            {products.map((p) => <option key={p.maSP} value={p.maSP}>{p.maSP} · {p.tenSP}</option>)}
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-slate-500">Tìm theo số lô</label>
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-300 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input value={loQuery} onChange={(e) => setLoQuery(e.target.value)} placeholder="Số lô thành phẩm"
+              className="pl-7 pr-2 py-1.5 w-40 border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-slate-500">Lọc thời gian theo</label>
+          <select value={dateField} onChange={(e) => { setDateField(e.target.value); setDateFrom(""); setDateTo(""); }}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400">
+            <option value="nsx">NSX</option>
+            <option value="hsd">HSD</option>
+          </select>
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-slate-500">Từ</label>
+          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-slate-500">Đến</label>
+          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        </div>
+        {hasActiveFilter && (
+          <button onClick={resetFilters} className="flex items-center gap-1 text-slate-500 hover:text-rose-600 py-1.5">
+            <X className="w-3.5 h-3.5" /> Xoá bộ lọc
+          </button>
+        )}
+      </div>
+      {!visibleProducts.length && (
+        <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Không tìm thấy sản phẩm.</div>
+      )}
       {visibleProducts.map((p) => {
-        const list = (groups[norm(p.tenSP)] || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const allList = (groups[norm(p.tenSP)] || []).slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const list = allList.filter(matchesRow);
+        if (hasRowFilter && !list.length) return null; // đang lọc theo lô/ngày, sản phẩm này không có mẻ khớp -> ẩn cả card
         const totalSoLuong = list.reduce((s, b) => s + (Number(b.soLuongDuKien) || 0), 0);
         const highlighted = focusMaSP === p.maSP;
         return (
@@ -3787,31 +3952,40 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
               <div className="p-5 text-center text-slate-400 text-xs">Chưa có mẻ nào được xác nhận đã pha cho sản phẩm này.</div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-xs whitespace-nowrap">
-                  <thead className="bg-slate-50 text-slate-400 text-left">
-                    <tr>{["Mẻ pha", "Số lượng dự kiến (ống)", "Xử lý nguyên liệu đầu vào", "Xử lý BTP sau pha", "Xử lý BTP sau đóng ống", "Quy trình xử lý khác nếu có", "Sản phẩm hoàn thiện", "Số lô", "NSX", "HSD"].map((h, i) => <th key={i} className="px-3 py-2 font-medium">{h}</th>)}</tr>
+                {/* table-fixed + cột rộng cố định — mọi sản phẩm cùng qua đúng các công đoạn này nên
+                    layout phải giống hệt nhau từ trên xuống dưới, không để bề rộng nhảy theo nội dung
+                    dài/ngắn từng dòng. Cột "Xử lý..." tự động cắt bớt (…) nếu dài, xem đủ bằng cách
+                    di chuột vào (title). */}
+                <table className="w-full text-xs table-fixed">
+                  <colgroup>
+                    <col className="w-20" /><col className="w-24" />
+                    <col className="w-36" /><col className="w-36" /><col className="w-36" /><col className="w-36" />
+                    <col className="w-32" /><col className="w-24" /><col className="w-24" /><col className="w-24" />
+                  </colgroup>
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>{["Mẻ pha", "SL dự kiến (ống)", "Xử lý nguyên liệu đầu vào", "Xử lý BTP sau pha", "Xử lý BTP sau đóng ống", "Quy trình xử lý khác nếu có", "Sản phẩm hoàn thiện", "Số lô", "NSX", "HSD"].map((h, i) => <th key={i} className="px-2 py-2 font-medium text-center align-middle leading-tight">{h}</th>)}</tr>
                   </thead>
                   <tbody>
                     {list.map((b) => (
                       <tr key={b.id} className="border-b border-slate-50">
-                        <td className="px-3 py-1.5 font-mono">{b.phaMe}</td>
+                        <td className="px-2 py-1.5 font-mono text-center truncate" title={b.phaMe || ""}>{b.phaMe}</td>
                         <td className="px-2 py-1 text-right">{b.soLuongDuKien != null ? fmt(b.soLuongDuKien, 0) : "–"}</td>
-                        <td className="px-3 py-1.5 text-slate-600">{b.xuLyNguyenLieuDauVao || "–"}</td>
-                        <td className="px-3 py-1.5 text-slate-600">{b.xuLyBtpSauPha || "–"}</td>
-                        <td className="px-3 py-1.5 text-slate-600">{b.xuLySauDongOng || "–"}</td>
-                        <td className="px-3 py-1.5 text-slate-600">{b.quyTrinhKhac || "–"}</td>
-                        <td className="px-2 py-1">{canEdit ? <EditText v={b.tenHoanThien} on={(x) => edit(b.id, "tenHoanThien", x)} w="w-32" ph="vd tên/quy cách" /> : (b.tenHoanThien || "–")}</td>
-                        <td className="px-2 py-1">{canEdit ? <EditText v={b.soLo} on={(x) => edit(b.id, "soLo", x)} w="w-24" ph="Số lô" /> : (b.soLo || "–")}</td>
-                        <td className="px-2 py-1">
+                        <td className="px-2 py-1.5 text-slate-600 truncate" title={b.xuLyNguyenLieuDauVao || ""}>{b.xuLyNguyenLieuDauVao || "–"}</td>
+                        <td className="px-2 py-1.5 text-slate-600 truncate" title={b.xuLyBtpSauPha || ""}>{b.xuLyBtpSauPha || "–"}</td>
+                        <td className="px-2 py-1.5 text-slate-600 truncate" title={b.xuLySauDongOng || ""}>{b.xuLySauDongOng || "–"}</td>
+                        <td className="px-2 py-1.5 text-slate-600 truncate" title={b.quyTrinhKhac || ""}>{b.quyTrinhKhac || "–"}</td>
+                        <td className="px-2 py-1 truncate">{canEdit ? <EditText v={b.tenHoanThien} on={(x) => edit(b.id, "tenHoanThien", x)} w="w-full" ph="vd tên/quy cách" title={b.tenHoanThien || ""} /> : (b.tenHoanThien || "–")}</td>
+                        <td className="px-2 py-1 text-center truncate">{canEdit ? <EditText v={b.soLo} on={(x) => edit(b.id, "soLo", x)} w="w-full" ph="Số lô" /> : (b.soLo || "–")}</td>
+                        <td className="px-2 py-1 text-center">
                           {canEdit ? (
                             <input type="date" value={b.nsx || ""} onChange={(e) => edit(b.id, "nsx", e.target.value || null)}
-                              className="text-xs border border-slate-200 rounded px-1.5 py-1" />
+                              className="w-full text-xs text-center border border-slate-200 rounded px-1.5 py-1" />
                           ) : (b.nsx ? new Date(b.nsx).toLocaleDateString("vi-VN") : "–")}
                         </td>
-                        <td className="px-2 py-1">
+                        <td className="px-2 py-1 text-center">
                           {canEdit ? (
                             <input type="date" value={b.hsd || ""} onChange={(e) => edit(b.id, "hsd", e.target.value || null)}
-                              className="text-xs border border-slate-200 rounded px-1.5 py-1" />
+                              className="w-full text-xs text-center border border-slate-200 rounded px-1.5 py-1" />
                           ) : (b.hsd ? new Date(b.hsd).toLocaleDateString("vi-VN") : "–")}
                         </td>
                       </tr>
