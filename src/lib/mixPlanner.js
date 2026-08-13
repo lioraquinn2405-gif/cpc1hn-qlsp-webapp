@@ -199,6 +199,12 @@ const RAW_ROUND_STEP_L = 0.5;
 // vơi so với mặt bằng chung.
 const SOFT_TARGET_L = 1000;
 
+// Ngưỡng "nhỉnh hơn cho phép" — khi cần dồn nốt 1 chai để tránh để lại mẩu vụn (xem
+// MIN_LOT_FRAGMENT_L), mẻ được phép vượt mốc mềm SOFT_TARGET_L tới tối đa mức này, KHÔNG được
+// vượt luôn tới sát trần cứng TANK_MAX_L (chốt NCV 2026-08-10: mốc mềm 1000L, cho nhỉnh tới
+// 1050L, trần tuyệt đối vẫn là 1080L).
+const SOFT_OVERFLOW_L = 1050;
+
 /**
  * Đóng mẻ theo hướng: CHỐT lượng nguyên liệu (F) đẹp (bội số 0.5L) trước, từ đó SUY RA thể
  * tích dịch pha (V = F·E/d) — không làm ngược lại (chốt V trước rồi ép F vừa khít) như trước,
@@ -274,6 +280,32 @@ function mergeSingleLotBatches(a, b) {
   return { meSo: 0, tongTheTich: a.tongTheTich + b.tongTheTich, tronLoSanXuat: loSanXuatList.length > 1, loSanXuatList, lots };
 }
 
+/**
+ * Chế độ "pha tròn chai NL" — MỖI LÔ (chai) = ĐÚNG 1 mẻ riêng, dùng trọn 100% F của lô, KHÔNG
+ * ghép nhiều lô vào 1 mẻ và KHÔNG tách 1 lô ra nhiều mẻ (khác hẳn packSingleStreamBatches vốn
+ * chủ động ghép/tách để mẻ nào cũng gần mốc mềm SOFT_TARGET_L). Dùng cho SP mà NCV chốt là
+ * không muốn ghép mẻ (chốt 2026-08-10) — thực tế cho thấy nhiều SP 1 thành phần vốn dĩ mỗi chai
+ * NL đã tự ra 1 mẻ cỡ 600-1000L, gần khớp trần tank sẵn, ghép thêm chỉ gây rối chứ không cần
+ * thiết. Mật độ luôn đúng G (không dò cao hơn, giống packSingleStreamBatches).
+ */
+function packWholeBottleBatches(selectedLots, G, H, tankMaxL = TANK_MAX_L) {
+  const ordered = [...selectedLots].sort((a, b) => naturalCompareMaLo(a.maLo, b.maLo));
+  return ordered.map((lot, i) => {
+    const theTichDich = (lot.F * lot.E) / G;
+    const soOng = Math.floor((lot.F * lot.E * 1000) / (G * H));
+    return {
+      meSo: i + 1,
+      tongTheTich: theTichDich,
+      tronLoSanXuat: false,
+      loSanXuatList: [loSanXuatOf(lot)],
+      lots: [{ maLo: lot.maLo, E: lot.E, theTichRaw: lot.F, theTichDich, soOng }],
+      // Trần tank vẫn là CỨNG (xem TANK_MAX_L) — 1 chai dư thể tích tự nhiên hiếm khi vượt, nhưng
+      // báo rõ nếu xảy ra thay vì âm thầm phá trần, để NCV chủ động tách bớt tay hoặc bỏ chế độ này.
+      overTankCap: theTichDich > tankMaxL + EPS,
+    };
+  });
+}
+
 export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH) {
   const ordered = [...selectedLots].sort((a, b) => naturalCompareMaLo(a.maLo, b.maLo));
   const totalV = ordered.reduce((s, l) => s + (l.F * l.E) / d, 0);
@@ -316,6 +348,9 @@ export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_
         if (hardCapLeftV <= EPS) { closeBatch(); continue; }
         const hardCapLeftF = (hardCapLeftV * d) / lot.E;
         const softCapLeftF = Math.max(0, (current.softTarget - currentV) * d) / lot.E;
+        // Chỗ trống tính tới SOFT_OVERFLOW_L (1050L) — trần "nhỉnh hơn cho phép" riêng cho nhánh
+        // dồn nốt tránh mẩu vụn bên dưới, KHÁC với hardCapLeftF (1080L, trần tuyệt đối).
+        const softOverflowLeftF = Math.max(0, (SOFT_OVERFLOW_L - currentV) * d) / lot.E;
 
         // LUÔN nhắm mốc mềm ĐỘNG trước (kể cả khi lô còn nhiều hơn cả trần cứng) — trần cứng chỉ
         // là giới hạn an toàn tuyệt đối, KHÔNG phải mục tiêu đổ đầy. Nhờ vậy mẻ không bị tham lam
@@ -338,9 +373,10 @@ export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_
 
           // Nếu phần CÒN LẠI của lô sau khi tách sẽ là 1 mẩu quá nhỏ (≤ MIN_LOT_FRAGMENT_L, khó
           // đong ở mẻ sau) — dùng LUÔN TRỌN VẸN phần còn lại của lô này cho mẻ hiện tại, miễn vẫn
-          // vừa trần cứng (chấp nhận mẻ này nhỉnh hơn mốc mềm một chút, đổi lại không còn mẩu vụn).
+          // vừa mốc "nhỉnh hơn cho phép" 1050L (chấp nhận mẻ này nhỉnh hơn mốc mềm một chút, đổi
+          // lại không còn mẩu vụn) — KHÔNG được nhỉnh tới tận trần cứng 1080L, quá xa mốc mềm.
           const leftoverAfterChunk = remainingF - chunk;
-          if (leftoverAfterChunk > EPS && leftoverAfterChunk <= MIN_LOT_FRAGMENT_L + EPS && remainingF <= hardCapLeftF + EPS) {
+          if (leftoverAfterChunk > EPS && leftoverAfterChunk <= MIN_LOT_FRAGMENT_L + EPS && remainingF <= softOverflowLeftF + EPS) {
             chunk = remainingF;
           }
           takeF = chunk;
@@ -396,8 +432,11 @@ export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_
  * Lập kế hoạch mẻ pha cho sản phẩm 1 thành phần hoạt chất.
  * @param {{maLo:string,E:number,F:number}[]} lots - các lô đang "Chờ pha" (đã qua KQKN, đạt) của đúng chủng.
  * @param {{N:number,G:number,H:number}} product - N: số ống cần, G: mật độ đích (CFU/ml), H: thể tích 1 ống (ml).
+ * @param {boolean} [wholeBottleOnly] - true: "pha tròn chai NL" — mỗi lô = đúng 1 mẻ riêng, không
+ *   ghép/tách qua nhiều mẻ (xem packWholeBottleBatches). Chỉ đổi cách ĐÓNG mẻ, không đổi cách CHỌN
+ *   lô (vẫn FIFO như bình thường tới khi đủ N).
  */
-export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH }) {
+export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH, wholeBottleOnly = false }) {
   const { N, G, H } = product;
   const target = (N * G * H) / 1000; // mốc dừng FIFO — mật độ luôn dùng đúng G, không dò d cao hơn
   const vMin = (TUBE_TOL_LOW * N * G * H) / 1000; // sàn khả thi tối thiểu (90% đơn)
@@ -411,7 +450,9 @@ export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxL
     return { feasible: false, reason: "Kho hiện có (đã qua KQKN, ở Chờ pha) không đủ nguyên liệu để đạt tối thiểu 90% số ống cần — cần NCV bổ sung nguyên liệu hoặc điều chỉnh đơn." };
   }
 
-  const batches = packSingleStreamBatches(best.subset, best.d, H, tankMaxL, maxLotsPerBatch);
+  const batches = wholeBottleOnly
+    ? packWholeBottleBatches(best.subset, G, H, tankMaxL)
+    : packSingleStreamBatches(best.subset, best.d, H, tankMaxL, maxLotsPerBatch);
   const massBalance = checkMassBalance(best.subset, best.d, best.T, H);
 
   return {
@@ -420,6 +461,7 @@ export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxL
     T: best.T,
     S: best.S,
     totalV: best.sumValue / best.d,
+    wholeBottleOnly,
     selectedLots: best.subset.map((l) => l.maLo),
     batches,
     massBalance,

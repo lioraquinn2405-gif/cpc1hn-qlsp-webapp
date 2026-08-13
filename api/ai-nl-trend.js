@@ -7,26 +7,36 @@
 import { requireApprovedUser } from "./_lib/adminAuth.js";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
+  // Bọc TOÀN BỘ handler trong try/catch (xem lý do y hệt trong ai-review-mix-plan.js, phát hiện
+  // 2026-08-10) — lỗi ngoài phần try/catch riêng của DeepSeek trước đây bị Vercel trả về trang lỗi
+  // không phải JSON, client chỉ hiện thông báo chung chung, không biết lỗi thật là gì.
+  try {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method not allowed" });
+      return;
+    }
+
+    const auth = await requireApprovedUser(req, res);
+    if (!auth) return;
+
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      res.status(500).json({ error: "Chưa cấu hình DEEPSEEK_API_KEY trên Vercel (Project Settings > Environment Variables)." });
+      return;
+    }
+
+    const { stats, label } = req.body || {};
+    if (!stats || typeof stats !== "object") {
+      res.status(400).json({ error: "Thiếu dữ liệu thống kê (stats)." });
+      return;
+    }
+    await handleTrend(res, apiKey, stats, label);
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Lỗi không xác định (ngoài dự kiến) khi phân tích xu hướng." });
   }
+}
 
-  const auth = await requireApprovedUser(req, res);
-  if (!auth) return;
-
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    res.status(500).json({ error: "Chưa cấu hình DEEPSEEK_API_KEY trên Vercel (Project Settings > Environment Variables)." });
-    return;
-  }
-
-  const { stats, label } = req.body || {};
-  if (!stats || typeof stats !== "object") {
-    res.status(400).json({ error: "Thiếu dữ liệu thống kê (stats)." });
-    return;
-  }
-
+async function handleTrend(res, apiKey, stats, label) {
   const messages = [
     {
       role: "system",

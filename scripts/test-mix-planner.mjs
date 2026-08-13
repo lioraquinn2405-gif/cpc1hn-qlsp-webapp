@@ -601,6 +601,47 @@ console.log("\n=== 16. planTwoComponent - roundRawTwoStream KHÔNG được bỏ
   }
 }
 
+console.log("\n=== 17. planSingleComponent - wholeBottleOnly: mỗi lô đúng 1 mẻ riêng, không ghép ===");
+{
+  const lots = [
+    { maLo: "26G02SA1.C1", E: 3.09e10, F: 10.0, loSanXuat: "26G02SA1" },
+    { maLo: "26G02SA1.C2", E: 2.98e10, F: 10.0, loSanXuat: "26G02SA1" },
+    { maLo: "26G02SA1.C3", E: 3.05e10, F: 10.0, loSanXuat: "26G02SA1" },
+    { maLo: "26G02SA1.C4", E: 3.13e10, F: 10.0, loSanXuat: "26G02SA1" },
+  ];
+  const G = 4.8e8, H = 5.3, N = 400_000;
+  const plan = planSingleComponent({ lots, product: { N, G, H }, wholeBottleOnly: true });
+  check("feasible = true", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
+    check("đúng 4 mẻ (bằng đúng số lô đã chọn, không ghép/tách)", plan.batches.length === lots.length,
+      `batches=${plan.batches.length}`);
+    check("mỗi mẻ đúng 1 lô", plan.batches.every((b) => b.lots.length === 1),
+      JSON.stringify(plan.batches.map((b) => b.lots.length)));
+    check("mỗi mẻ dùng TRỌN 100% F của lô (không cắt/làm tròn bớt)",
+      plan.batches.every((b) => Math.abs(b.lots[0].theTichRaw - lots.find((l) => l.maLo === b.lots[0].maLo).F) < 1e-9));
+    // Đối chiếu với 4 mẻ thật đã xác nhận (2026-08-10): Mẻ 01-644L/02-621L/03-636L/04-653L.
+    const expected = { "26G02SA1.C1": 643.75, "26G02SA1.C2": 620.83, "26G02SA1.C3": 635.42, "26G02SA1.C4": 652.08 };
+    const mismatches = plan.batches.filter((b) => !approx(b.tongTheTich, expected[b.lots[0].maLo], 0.05));
+    check("thể tích mẻ khớp đúng dữ liệu SX thật đã xác nhận (±0.05L)", mismatches.length === 0,
+      JSON.stringify(mismatches.map((b) => ({ lo: b.lots[0].maLo, v: b.tongTheTich }))));
+    check("không mẻ nào vượt trần tank", plan.batches.every((b) => !b.overTankCap));
+    check("đối soát bào tử pass (<1%)", plan.massBalance.pass, `diff=${plan.massBalance.diffPct.toFixed(4)}%`);
+  }
+}
+
+console.log("\n=== 18. planSingleComponent - wholeBottleOnly=false (mặc định) vẫn ghép mẻ như cũ (không đổi hành vi gốc) ===");
+{
+  // Dùng lại đúng bộ BO2_LOTS + N của test 3 (đã biết trước sẽ ra mẻ ghép nhiều lô) để chứng minh
+  // KHÔNG truyền wholeBottleOnly thì hành vi gốc (có ghép mẻ) vẫn y nguyên, không bị đổi ngầm.
+  const sumValueAll = BO2_LOTS.reduce((s, l) => s + l.E * l.F, 0);
+  const T_at_G = (sumValueAll * 1000) / (G2 * H2);
+  const N = Math.floor(T_at_G / 1.08);
+  const plan = planSingleComponent({ lots: BO2_LOTS, product: { N, G: G2, H: H2 } });
+  check("không truyền wholeBottleOnly vẫn ra hành vi ghép mẻ như trước (có mẻ >1 lô)",
+    plan.feasible && plan.batches.some((b) => b.lots.length > 1),
+    JSON.stringify(plan.batches?.map((b) => b.lots.length)));
+}
+
 function EPStest() {
   return 1e-3; // dung sai số học khi so sánh dấu chấm động trong test
 }

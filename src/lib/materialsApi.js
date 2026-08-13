@@ -11,6 +11,7 @@ const MATERIAL_FIELDS = [
   ["phaProduct", "pha_product"], ["phaMe", "pha_me"], ["loai", "loai"],
   ["phInvalid", "ph_invalid"], ["pendingDelete", "pending_delete"], ["deletedAt", "deleted_at"],
   ["choSX", "cho_sx"], ["choSxAt", "cho_sx_at"], ["mixPlanId", "mix_plan_id"], ["mixPlanMeSo", "mix_plan_me_so"],
+  ["huyThuCong", "huy_thu_cong"], ["choXuLyThuCong", "cho_xu_ly_thu_cong"],
   ["createdBy", "created_by"], ["updatedBy", "updated_by"],
 ];
 const PRODUCT_FIELDS = [

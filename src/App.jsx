@@ -26,6 +26,10 @@ const NL_TABS = [
   { key: "da-pha", label: "Đã pha", icon: PackageOpen },
   { key: "da-huy", label: "Đã huỷ", icon: Ban },
 ];
+const STATUS_LABEL = {
+  "cho-kqkn": "Chờ KQKN", "cho-pha": "Chờ pha", "cho-xu-ly": "Chờ xử lý",
+  "da-pha": "Đã pha", "da-huy": "Đã huỷ", "cho-sx": "Chờ SX", "cho-xoa": "Thùng rác",
+};
 const STRAIN_OPTIONS = [
   { value: "subtilis", label: "Bacillus subtilis" },
   { value: "clausii", label: "Bacillus clausii" },
@@ -188,11 +192,17 @@ function classify(rec) {
   // với ghi chú tự do kiểu cũ vô tình có chữ "subtilis" trong đó (dữ liệu lịch sử không sạch).
   const isPassSub = rec.strain === "clausii" && ((!isFail && nk.includes("dat") && nk.includes("sub")) || legacySubPattern);
   const isPass = !isFail && !isPassSub && nk.includes("dat");
+  // Mọi lựa chọn ở "Nhiễm con nào" (kể cả "Gram dương sinh bào tử") đều là nhóm chung chung,
+  // không đủ để xác định đúng VK — bắt buộc QC ghi rõ tên VK vào Ghi chú TRƯỚC khi cho chuyển
+  // "Chờ xử lý", tránh chuyển tab mất dòng ngay giữa lúc QC còn đang nhập dở dữ liệu (chốt với
+  // NCV, phản hồi 2026-08-10 — lúc đầu chỉ chặn 2/3 lựa chọn, test thực tế lộ ra vẫn nhảy sớm
+  // với lựa chọn thứ 3 nên mở rộng chặn cả 3).
+  const missingGhiChu = isFail && !isPassSub && !!rec.nhiemConNao && !rec.ghiChu;
   const missingNhiemConNao = isFail && !isPassSub && !rec.nhiemConNao;
 
-  if (!nk || missingNhiemConNao) {
+  if (!nk || missingNhiemConNao || missingGhiChu) {
     if (reasons.length) return { status: disposed ? "da-huy" : "cho-xu-ly", loai: null, expired, nearExpiry, reasons };
-    return { status: "cho-kqkn", loai: null, chuaQC: true, nearExpiry, qcDays: daysSinceThu(rec), needsNhiemConNao: missingNhiemConNao };
+    return { status: "cho-kqkn", loai: null, chuaQC: true, nearExpiry, qcDays: daysSinceThu(rec), needsNhiemConNao: missingNhiemConNao, needsGhiChu: missingGhiChu };
   }
 
   let loai = null;
@@ -211,6 +221,11 @@ const statusOf = (rec) => {
   if (rec.daPha) return { status: "da-pha", loai: rec.loai };
   if (rec.choSX) return { status: "cho-sx", loai: rec.loai };
   if (rec.pendingDelete) return { status: "cho-xoa", loai: null };
+  // Chuyển tay (bù cho thực tế không khớp dữ liệu QC/kho) — đặt TRƯỚC classify() để có hiệu
+  // lực bất kể dữ liệu QC đủ hay thiếu, khác với huy_thu_cong bản cũ (chỉ có tác dụng khi đã
+  // sẵn có lý do chờ xử lý/hết hạn, không ép được từ "Chờ pha"/"Chờ KQKN" thẳng sang Đã huỷ).
+  if (rec.huyThuCong) return { status: "da-huy", loai: null };
+  if (rec.choXuLyThuCong) return { status: "cho-xu-ly", loai: null, reasons: ["Chuyển tay sang Chờ xử lý"] };
   return classify(rec);
 };
 
@@ -617,9 +632,22 @@ function Connected({ session, profile }) {
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
     }
+    // MĐ SH (mật độ SAU HẤP) = MĐ nhãn × Bào tử % — hấp tiệt trùng chỉ bào tử sống sót nên
+    // đo lại từ đầu là dư thừa, tính thẳng từ 2 số QC đã có. Sửa MĐ nhãn hoặc Bào tử % thì
+    // tự tính lại MĐ SH; vẫn cho sửa tay MĐ SH riêng nếu cần ghi đè (vd đo thực tế khác biệt).
+    if (field === "mdNhan" || field === "tyLeBaoTu") {
+      const row = materials.find((r) => r.id === id);
+      const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
+      const tyLeBaoTu = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
+      const mdSH = mdNhan != null && tyLeBaoTu != null ? Math.round(mdNhan * tyLeBaoTu / 100 * 100) / 100 : row?.mdSH;
+      const patch = { [field]: value, mdSH };
+      setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+      updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
+      return;
+    }
     setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value, updatedBy: actorId } : r)));
     updateMaterialField(id, field, value, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
-  }, [actorId]);
+  }, [actorId, materials]);
   const removeRec = (id) => {
     setMaterials((prev) => prev.filter((r) => r.id !== id));
     removeMaterial(id).catch((err) => setNote(`Lỗi xoá: ${err.message}`));
@@ -648,8 +676,10 @@ function Connected({ session, profile }) {
 
   const addLot = async ({ strain, lo, soChai }) => {
     const trimmedLo = lo.trim();
-    if (materials.some((r) => r.lo === trimmedLo)) {
-      throw new Error(`Lô "${trimmedLo}" đã tồn tại trong hệ thống.`);
+    const existing = materials.find((r) => r.lo === trimmedLo);
+    if (existing) {
+      const statusLabel = STATUS_LABEL[statusOf(existing).status] || "?";
+      throw new Error(`Lô "${trimmedLo}" đã tồn tại trong hệ thống — đang ở "${statusLabel}".`);
     }
     const d = parseSoLoDate(trimmedLo);
     const dotSanXuat = d ? `${d.getMonth() + 1}/${d.getFullYear()}` : "";
@@ -661,9 +691,44 @@ function Connected({ session, profile }) {
     });
     await insertMaterialsBulk(rows);
     setNote(`Đã thêm lô ${trimmedLo} (${soChai} chai) — chờ QC nhập kết quả.`);
-    setTab("cho-pha");
+    setTab("cho-kqkn");
     setStrainFilter(strain);
     reload();
+  };
+
+  // Bù chai bị quét thiếu (Apps Script quét mail đôi khi sót dòng) — nối tiếp số chai lớn
+  // nhất đang có trong lô, không tự đoán số bị thiếu vì không biết chính xác chai nào sót.
+  const addBottleToLot = async (lo, count) => {
+    const existing = materials.filter((r) => r.lo === lo);
+    if (!existing.length) throw new Error(`Không tìm thấy lô "${lo}".`);
+    const { strain, tenNL, chung, dotSanXuat } = existing[0];
+    const chaiNum = (r) => parseInt(String(r.chai || "").replace(/[^0-9]/g, ""), 10) || 0;
+    const maxChai = Math.max(...existing.map(chaiNum));
+    const rows = Array.from({ length: count }, (_, i) => {
+      const chai = `C${maxChai + i + 1}`;
+      return { strain, tenNL, chung, dotSanXuat, soLo: `${lo}.${chai}`, lo, chai, daPha: false, phInvalid: false, createdBy: actorId };
+    });
+    await insertMaterialsBulk(rows);
+    setNote(`Đã thêm ${count} chai vào lô ${lo}.`);
+    reload();
+  };
+
+  // Chuyển trạng thái tay — bù cho trường hợp thực tế (đối chiếu kho/sản xuất) không khớp dữ
+  // liệu QC hiện có trên hệ thống, thay vì phải nhờ sửa DB thủ công mỗi lần.
+  const forceDaPha = (id) => {
+    const patch = { daPha: true, daPhaAt: new Date().toISOString() };
+    setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+    updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi: ${err.message}`));
+  };
+  const forceChoXuLy = (id) => {
+    const patch = { choXuLyThuCong: true, huyThuCong: false };
+    setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+    updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi: ${err.message}`));
+  };
+  const forceDaHuy = (id) => {
+    const patch = { huyThuCong: true, choXuLyThuCong: false };
+    setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+    updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi: ${err.message}`));
   };
 
   const counts = useMemo(() => {
@@ -733,11 +798,12 @@ function Connected({ session, profile }) {
             </div>
           ) : (
             <>
-              {tab === "cho-pha" && canEditNL && <AddLotForm onAdd={addLot} />}
+              {tab === "cho-kqkn" && canEditNL && <AddLotForm onAdd={addLot} />}
               {(tab === "cho-pha" || tab === "cho-kqkn" || tab === "cho-xu-ly" || tab === "da-pha" || tab === "da-huy" || tab === "cho-xoa") && (
                 <MaterialTable rows={filtered(tab)} status={tab} onEdit={editField} onRemove={removeRec}
                   onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
-                  canEditNL={canEditNL} canEditQcResults={canEditQcResults} />
+                  canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
+                  onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} />
               )}
               {/* Chờ SX nằm trong mục "Pha chế", không có bộ lọc theo chủng (subtilis/clausii) như
                   "Quản lý NL" — mỗi mẻ vốn đã gộp cả 2 chủng, lọc riêng từng chủng sẽ hiện mẻ thiếu. */}
@@ -1061,21 +1127,102 @@ function AddLotForm({ onAdd }) {
   );
 }
 
+/* ---------------- Bù chai bị quét thiếu (thêm tay vào lô đã có) ---------------- */
+function AddBottleInline({ lo, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [count, setCount] = useState(1);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.stopPropagation();
+    if (Number(count) < 1) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onAdd(lo, Number(count));
+      setCount(1);
+      setOpen(false);
+    } catch (err) {
+      setError(err.message);
+    }
+    setSaving(false);
+  };
+
+  if (!open) {
+    return (
+      <button onClick={(e) => { e.stopPropagation(); setOpen(true); }} title="Thêm chai bị quét thiếu vào lô này"
+        className="shrink-0 flex items-center justify-center w-6 h-6 rounded-full text-emerald-600 hover:bg-emerald-100">
+        <Plus className="w-4 h-4" />
+      </button>
+    );
+  }
+  return (
+    <div onClick={(e) => e.stopPropagation()} className="shrink-0 flex items-center gap-1.5">
+      <input type="number" min="1" value={count} onChange={(e) => setCount(e.target.value)}
+        className="w-14 text-xs border border-slate-300 rounded px-1.5 py-1" />
+      <button onClick={submit} disabled={saving}
+        className="text-xs bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-2 py-1 rounded">
+        {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Thêm"}
+      </button>
+      <button onClick={(e) => { e.stopPropagation(); setOpen(false); }} className="text-xs text-slate-500 hover:text-slate-700 px-1">Huỷ</button>
+      {error && <span className="text-[11px] text-rose-600">{error}</span>}
+    </div>
+  );
+}
+
+/* ---------------- Chuyển trạng thái tay (bù thực tế lệch dữ liệu QC/kho) ---------------- */
+const FORCE_STATUS_LABEL = { "da-pha": "Đã pha", "cho-xu-ly": "Chờ xử lý", "da-huy": "Đã huỷ" };
+function ForceStatusSelect({ soLo, onDaPha, onChoXuLy, onDaHuy }) {
+  const handlers = { "da-pha": onDaPha, "cho-xu-ly": onChoXuLy, "da-huy": onDaHuy };
+  return (
+    <select
+      value=""
+      title="Chuyển trạng thái tay — dùng khi thực tế đã pha/cần xử lý/huỷ nhưng dữ liệu QC chưa khớp"
+      onChange={(e) => {
+        const key = e.target.value;
+        e.target.value = "";
+        if (!key) return;
+        if (window.confirm(`Chuyển tay số lô ${soLo} sang "${FORCE_STATUS_LABEL[key]}"?`)) handlers[key]();
+      }}
+      className="text-[11px] border border-slate-200 rounded px-1 py-1 text-slate-500 bg-white"
+    >
+      <option value="">Chuyển…</option>
+      <option value="da-pha">→ Đã pha</option>
+      <option value="cho-xu-ly">→ Chờ xử lý</option>
+      <option value="da-huy">→ Đã huỷ</option>
+    </select>
+  );
+}
+
 /* ---------------- Ô sửa nhanh ---------------- */
-function EditText({ v, on, w = "w-24", ph, disabled }) {
-  return <input value={v ?? ""} placeholder={ph} disabled={disabled} onChange={(e) => on(e.target.value)}
-    className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-slate-50 disabled:text-slate-400`} />;
+function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur }) {
+  // commitOnBlur: chỉ lưu (và do đó chỉ kích hoạt phân loại lại trạng thái, vd nhảy sang
+  // "Chờ xử lý") lúc rời khỏi ô — không lưu theo từng ký tự như mặc định, tránh dòng bị
+  // chuyển tab ngay giữa lúc còn đang gõ dở (vd Ghi chú bắt buộc trước khi chuyển Chờ xử lý).
+  const [text, setText] = useState(v ?? "");
+  useEffect(() => { setText(v ?? ""); }, [v]);
+  return <input value={commitOnBlur ? text : (v ?? "")} placeholder={ph} disabled={disabled}
+    onChange={(e) => { const val = e.target.value; commitOnBlur ? setText(val) : on(val); }}
+    onBlur={commitOnBlur ? () => on(text) : undefined}
+    className={`${w} text-xs border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-slate-50 disabled:text-slate-400 ${err ? "border-rose-400 bg-rose-50" : "border-slate-200"}`} />;
 }
 function EditNum({ v, on, w = "w-16" }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
   // không gõ tiếp được số thập phân.
   const [text, setText] = useState(v ?? "");
-  useEffect(() => { setText(v ?? ""); }, [v]);
+  // Bug "nhảy số": mỗi lần gõ xong 1 ký tự hợp lệ (vd "8,") đã gọi on() lưu tạm lên Supabase,
+  // Realtime lập tức phản hồi lại giá trị đã lưu (vd "8", mất phần thập phân đang gõ dở) qua
+  // prop v — nếu vẫn đồng bộ lại lúc đang gõ thì mất luôn phần vừa nhập, gõ tiếp bị sai số.
+  // Chỉ đồng bộ lại từ v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi blur).
+  const focusedRef = useRef(false);
+  useEffect(() => { if (!focusedRef.current) setText(v ?? ""); }, [v]);
   return (
     <input
       value={text}
       inputMode="decimal"
+      onFocus={() => { focusedRef.current = true; }}
       onChange={(e) => {
         const raw = e.target.value;
         setText(raw);
@@ -1083,14 +1230,14 @@ function EditNum({ v, on, w = "w-16" }) {
         const n = num(raw);
         if (n != null) on(n);
       }}
-      onBlur={() => setText(v ?? "")}
+      onBlur={() => { focusedRef.current = false; setText(v ?? ""); }}
       className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 text-right focus:outline-none focus:ring-1 focus:ring-emerald-400`}
     />
   );
 }
 
 /* ---------------- Bảng NL ---------------- */
-function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults }) {
+function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy }) {
   const [open, setOpen] = useState({});
   const ro = status === "da-pha" || status === "da-huy" || status === "cho-xoa";
   // Thời gian thu/Lô chủng/V dịch: chỉ admin sửa được (dữ liệu nhập liệu/logistics, không phải "kết
@@ -1142,12 +1289,15 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
         const tenNL = list[0]?.tenNL, chung = list[0]?.chung;
         return (
           <div key={key} className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-            <button onClick={() => setOpen((s) => ({ ...s, [key]: !isOpen }))}
-              className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-50 hover:bg-slate-100 text-left">
-              {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
-              <span className="font-mono text-sm font-medium">{key}</span>
-              <span className="text-xs text-slate-500">· {tenNL} {chung} · {list.length} chai</span>
-            </button>
+            <div className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-50 hover:bg-slate-100">
+              <button onClick={() => setOpen((s) => ({ ...s, [key]: !isOpen }))}
+                className="flex-1 min-w-0 flex items-center gap-2 text-left">
+                {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+                <span className="font-mono text-sm font-medium">{key}</span>
+                <span className="text-xs text-slate-500">· {tenNL} {chung} · {list.length} chai</span>
+              </button>
+              {canRowAction && status === "cho-kqkn" && <AddBottleInline lo={key} onAdd={onAddBottle} />}
+            </div>
             {isOpen && (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs whitespace-nowrap">
@@ -1225,8 +1375,10 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
                                   <option value="Gram dương sinh bào tử">Gram dương sinh bào tử</option>
                                   <option value="Gram âm">Gram âm</option>
                                 </select>
-                                {(r.nhiemConNao === "Gram dương" || r.nhiemConNao === "Gram âm") && (
-                                  <span className="text-[10px] text-amber-600 whitespace-nowrap">Ghi rõ tên VK vào Ghi chú</span>
+                                {r.nhiemConNao && (
+                                  <span className={`text-[10px] whitespace-nowrap ${st.needsGhiChu ? "text-rose-600 font-semibold" : "text-amber-600"}`}>
+                                    {st.needsGhiChu ? "⚠ Bắt buộc ghi rõ tên VK vào Ghi chú" : "Ghi rõ tên VK vào Ghi chú"}
+                                  </span>
                                 )}
                                 {st.needsNhiemConNao && (
                                   <span className="text-[10px] text-rose-600 font-semibold whitespace-nowrap">⚠ Bắt buộc chọn con nhiễm</span>
@@ -1235,7 +1387,7 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
                             )}
                           </td>
                           <td className="px-2 py-1.5"><div className="flex items-center gap-1"><LoaiBadge strain={r.strain} loai={st.loai} />{st.expired && <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">Quá hạn</span>}{st.nearExpiry && <span className="text-[11px] px-2 py-0.5 rounded-full bg-red-600 text-white font-medium">Sắp hết hạn</span>}</div></td>
-                          <td className="px-2 py-1">{roQcFields ? (r.ghiChu || "–") : <EditText v={r.ghiChu} on={(x)=>onEdit(r.id,"ghiChu",x)} w="w-32" />}</td>
+                          <td className="px-2 py-1">{roQcFields ? (r.ghiChu || "–") : <EditText v={r.ghiChu} on={(x)=>onEdit(r.id,"ghiChu",x)} w="w-32" err={st.needsGhiChu} commitOnBlur={st.needsGhiChu} />}</td>
                           {showReason && <td className="px-3 py-1.5 text-rose-700 whitespace-normal max-w-xs">{(st.reasons || []).join(" · ") || "–"}</td>}
                           {status === "da-pha" && <td className="px-3 py-1.5"><span className="font-medium text-sky-700">{r.phaProduct || "–"}</span>{r.phaMe && <span className="text-slate-400"> · mẻ {r.phaMe}</span>}</td>}
                           {status === "da-pha" && <td className="px-3 py-1.5 text-slate-500">{r.daPhaAt ? new Date(r.daPhaAt).toLocaleString("vi-VN") : "–"}</td>}
@@ -1243,11 +1395,26 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
                           <td className="px-3 py-1.5 text-slate-500">{nameOf(r.updatedBy)}</td>
                           <td className="px-2 py-1.5 text-right whitespace-nowrap">
                             {!canRowAction ? null : status === "cho-pha" ? (
-                              <button onClick={()=>onSoftDelete(r.id)} title="Chuyển vào thùng rác" className="text-slate-300 hover:text-rose-500"><X className="w-4 h-4" /></button>
+                              <div className="flex items-center justify-end gap-2">
+                                <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
+                                <button onClick={()=>onSoftDelete(r.id)} title="Chuyển vào thùng rác" className="text-slate-300 hover:text-rose-500"><X className="w-4 h-4" /></button>
+                              </div>
+                            ) : status === "cho-kqkn" ? (
+                              <div className="flex items-center justify-end gap-2">
+                                <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
+                                <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                              </div>
                             ) : status === "cho-xoa" ? (
                               <div className="flex items-center justify-end gap-2">
                                 <button onClick={()=>onRestore(r.id)} title="Khôi phục" className="text-slate-400 hover:text-emerald-600"><RotateCcw className="w-3.5 h-3.5" /></button>
                                 <button onClick={()=>{ if (window.confirm(`Xoá vĩnh viễn số lô ${r.soLo}? Không thể hoàn tác.`)) onRemove(r.id); }} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                              </div>
+                            ) : status === "cho-xu-ly" ? (
+                              <div className="flex items-center justify-end gap-2">
+                                <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
+                                <button onClick={()=>{ if (window.confirm(`Chuyển số lô ${r.soLo} sang "Đã huỷ" ngay?`)) onEdit(r.id, "huyThuCong", true); }}
+                                  title="Chuyển sang Đã huỷ" className="text-slate-400 hover:text-rose-600"><Ban className="w-3.5 h-3.5" /></button>
+                                <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
                               </div>
                             ) : (
                               <button onClick={()=>onRemove(r.id)} className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -2075,6 +2242,9 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   const [nInput, setNInput] = useState(sp?.soOngNhip ? String(sp.soOngNhip) : "");
   const [gInput, setGInput] = useState(sp?.hamLuong ? String(sp.hamLuong) : "");
   const [gInput2, setGInput2] = useState(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
+  // "Pha tròn chai NL" — chỉ áp dụng SP 1 thành phần (chốt NCV 2026-08-10): mỗi lô = đúng 1 mẻ
+  // riêng, không ghép nhiều lô vào 1 mẻ (xem packWholeBottleBatches trong mixPlanner.js).
+  const [wholeBottleOnly, setWholeBottleOnly] = useState(false);
   const [plan, setPlan] = useState(null);
   const [batchOverrides, setBatchOverrides] = useState({}); // { [meSo]: V (L) do NCV tự chọn nới trần mẻ đó }
   // { [meSo]: true|false } — NCV tự ép có/không cần tiệt trùng trước mẻ đó, ghi đè quy tắc tự động
@@ -2105,6 +2275,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
     setNInput(sp?.soOngNhip ? String(sp.soOngNhip) : "");
     setGInput(sp?.hamLuong ? String(sp.hamLuong) : "");
     setGInput2(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
+    setWholeBottleOnly(false);
     setPlan(null);
     setBatchOverrides({});
     setSterilizeOverrides({});
@@ -2192,7 +2363,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       result._clausiiPool = clausiiLots;
     } else {
       const lots = poolLots(sp.pool, sp.allowOtherLoai);
-      result = planSingleComponent({ lots, product: { N, G: G1, H: sp.tubeMl } });
+      result = planSingleComponent({ lots, product: { N, G: G1, H: sp.tubeMl }, wholeBottleOnly });
       result._kind = "single";
       result._G = G1;
       result._lotsPool = lots;
@@ -2482,6 +2653,13 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
               <input value={gInput2} onChange={(e) => setGInput2(e.target.value)} placeholder="vd 4e8"
                 className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
             </div>
+          )}
+          {!sp.pool2 && (
+            <label className="flex items-center gap-2 text-sm text-slate-600 pb-2" title="Mỗi lô NL tự thành 1 mẻ riêng, không ghép nhiều lô vào 1 mẻ">
+              <input type="checkbox" checked={wholeBottleOnly} onChange={(e) => setWholeBottleOnly(e.target.checked)}
+                className="accent-emerald-600" />
+              Pha tròn chai NL (không ghép mẻ)
+            </label>
           )}
           <button onClick={tinhKeHoach} disabled={!canPreview} title={!canPreview ? "Tài khoản của bạn không có quyền tính kế hoạch pha chế" : undefined}
             className="flex items-center gap-2 bg-emerald-600 text-white text-sm px-4 py-2 rounded-md hover:bg-emerald-700 disabled:opacity-40">

@@ -19,25 +19,37 @@ const GLOSSARY = `Chú giải ký hiệu dùng trong dữ liệu (đối chiếu
 - meSo = số thứ tự mẻ pha trong nhịp; mỗi mẻ dưới 1080L, tối đa 3 lô NL mở/mẻ`;
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
+  // Bọc TOÀN BỘ handler (kể cả requireApprovedUser) trong try/catch — trước đây nếu lỗi xảy ra
+  // NGOÀI phần try/catch riêng của DeepSeek (vd Supabase auth crash), Vercel tự trả về trang lỗi
+  // không phải JSON, client không parse được nên chỉ hiện "Không rà soát được" chung chung, không
+  // biết lỗi thật là gì (phát hiện qua báo cáo NCV 2026-08-10, không tái hiện được qua log CLI).
+  try {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method not allowed" });
+      return;
+    }
 
-  const auth = await requireApprovedUser(req, res);
-  if (!auth) return;
+    const auth = await requireApprovedUser(req, res);
+    if (!auth) return;
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    res.status(500).json({ error: "Chưa cấu hình DEEPSEEK_API_KEY trên Vercel (Project Settings > Environment Variables)." });
-    return;
-  }
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
+      res.status(500).json({ error: "Chưa cấu hình DEEPSEEK_API_KEY trên Vercel (Project Settings > Environment Variables)." });
+      return;
+    }
 
-  const { planSummary } = req.body || {};
-  if (!planSummary || typeof planSummary !== "object") {
-    res.status(400).json({ error: "Thiếu dữ liệu kế hoạch (planSummary)." });
-    return;
+    const { planSummary } = req.body || {};
+    if (!planSummary || typeof planSummary !== "object") {
+      res.status(400).json({ error: "Thiếu dữ liệu kế hoạch (planSummary)." });
+      return;
+    }
+    await handleReview(res, apiKey, planSummary);
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Lỗi không xác định (ngoài dự kiến) khi rà soát AI." });
   }
+}
+
+async function handleReview(res, apiKey, planSummary) {
 
   const messages = [
     {
