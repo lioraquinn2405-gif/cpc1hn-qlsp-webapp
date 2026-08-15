@@ -10,6 +10,7 @@ import {
   canonicalStrainName, chaiCountForScale, computeFinishedTubesFromDensity,
   densityFormulaForStrain, isDensityEligible, sortBatchesNewestFirst,
 } from "./lib/lenmenFormula.js";
+import LenMenOverview from "./LenMenOverview.jsx";
 
 const PAGE_SIZE = 15;
 const PREP_STATUSES = ["Chờ lên men", "Chờ pha", "Chờ hủy", "Đã xử lý"];
@@ -314,8 +315,12 @@ export default function LenMenPanel({ tab }) {
     );
   }
 
-  if (tab === "lenmen-khsx" || tab === "lenmen-overview") {
-    return <EmptyCard>Phần này đang được chuyển sang, tạm thời dùng ở hệ thống cũ.</EmptyCard>;
+  // Tổng quan tính thẳng từ toàn bộ lô đã nạp, không lọc theo bộ lọc của Danh sách lô —
+  // báo cáo phải phản ánh toàn cảnh, không phụ thuộc người dùng đang lọc gì.
+  if (tab === "lenmen-overview") return <LenMenOverview batches={batches} />;
+
+  if (tab === "lenmen-khsx") {
+    return <EmptyCard>Kế hoạch sản xuất đang được chuyển sang, tạm thời dùng ở hệ thống cũ.</EmptyCard>;
   }
 
   return (
