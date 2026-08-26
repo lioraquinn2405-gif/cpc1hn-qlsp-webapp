@@ -1,15 +1,12 @@
 // Menu "Cảnh báo lên men" — port từ app Node + SQLite chạy riêng trước đây
 // (canhbaolenmen.dtpduyetquytrinhsanxuat.io.vn) thành 1 mục trong sidebar, dưới "Sản phẩm".
 //
-// Lát cắt hiện tại: XEM Danh sách lô + Định lượng mật độ. Sửa/thêm lô, Kế hoạch sản xuất
-// và Tổng quan làm ở các commit sau — hệ cũ vẫn chạy song song cho tới khi đủ parity.
+// Lát cắt hiện tại: XEM Danh sách lô. Sửa/thêm lô, Kế hoạch sản xuất và Tổng quan làm ở các
+// commit sau — hệ cũ vẫn chạy song song cho tới khi đủ parity.
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, Search, CircleDashed } from "lucide-react";
-import { fetchBatches, subscribeBatches, fetchLenmenSettings, parseDensityConfig } from "./lib/lenmenApi.js";
-import {
-  canonicalStrainName, chaiCountForScale, computeFinishedTubesFromDensity,
-  densityFormulaForStrain, isDensityEligible, sortBatchesNewestFirst,
-} from "./lib/lenmenFormula.js";
+import { AlertTriangle, CheckCircle2, Loader2, Search } from "lucide-react";
+import { fetchBatches, subscribeBatches } from "./lib/lenmenApi.js";
+import { canonicalStrainName, sortBatchesNewestFirst } from "./lib/lenmenFormula.js";
 import LenMenOverview from "./LenMenOverview.jsx";
 
 const PAGE_SIZE = 15;
@@ -61,7 +58,7 @@ function PrepBadge({ status }) {
 
 /* ---------------------------------- Bộ lọc ---------------------------------- */
 
-function FilterBar({ months, strains, filters, setFilters, showStatus }) {
+function FilterBar({ months, strains, filters, setFilters }) {
   const set = (patch) => setFilters((f) => ({ ...f, ...patch, page: 1 }));
   const selectCls = "border border-slate-300 rounded-md px-3 py-2 text-sm bg-white";
   return (
@@ -92,17 +89,15 @@ function FilterBar({ months, strains, filters, setFilters, showStatus }) {
           {strains.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
-      {showStatus && (
-        <div>
-          <label className="text-xs text-slate-500">Trạng thái</label>
-          <select value={filters.status} onChange={(e) => set({ status: e.target.value })} className={`block mt-1 ${selectCls}`}>
-            <option value="ALL">Tất cả</option>
-            <option value="INFECTED">Chỉ lô cảnh báo</option>
-            <option value="PASS">Chỉ lô đạt</option>
-            {PREP_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-      )}
+      <div>
+        <label className="text-xs text-slate-500">Trạng thái</label>
+        <select value={filters.status} onChange={(e) => set({ status: e.target.value })} className={`block mt-1 ${selectCls}`}>
+          <option value="ALL">Tất cả</option>
+          <option value="INFECTED">Chỉ lô cảnh báo</option>
+          <option value="PASS">Chỉ lô đạt</option>
+          {PREP_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
     </div>
   );
 }
@@ -174,77 +169,18 @@ function BatchTable({ rows }) {
   );
 }
 
-/* ------------------------------ Bảng định lượng ------------------------------ */
-
-function DensityTable({ rows, config }) {
-  if (!rows.length) {
-    return (
-      <EmptyCard>
-        Không có lô nào từ {String(config.cutoffMonth).padStart(2, "0")}/{config.cutoffYear} khớp bộ lọc.
-      </EmptyCard>
-    );
-  }
-  return (
-    <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
-      <table className="w-full text-xs whitespace-nowrap">
-        <thead className="bg-slate-50">
-          <tr>
-            <TH>Chủng men</TH><TH>Mã lô</TH><TH>Đợt SX</TH><TH>Cỡ lô</TH>
-            <TH className="text-right">Số chai</TH><TH className="text-right">Ống thành phẩm</TH><TH>Tình trạng</TH>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((b) => {
-            const details = Array.isArray(b.densityDetails) ? b.densityDetails : [];
-            const hasData = details.some((r) => r && (r.volume || r.density_after));
-            // Tính lại tại chỗ thay vì tin cột finishedTubes: nếu admin đổi công thức trong
-            // Cài đặt thì bảng phải phản ánh ngay, không đợi nhập lại từng lô.
-            const computed = computeFinishedTubesFromDensity(b.rawMaterial, details, config.formula);
-            const hasFormula = !!densityFormulaForStrain(b.rawMaterial, config.formula);
-            return (
-              <tr key={b.id} className="border-t border-slate-100 hover:bg-slate-50">
-                <TD className="whitespace-normal">{b.rawMaterial || "–"}</TD>
-                <TD className="font-mono font-medium text-slate-800">{b.lotNumber}</TD>
-                <TD>{b.productionBatch || "–"}</TD>
-                <TD>{b.scale || "–"}</TD>
-                <TD className="text-right">{chaiCountForScale(b.scale, config.chaiPer1000L)}</TD>
-                <TD className="text-right font-medium">
-                  {hasFormula ? fmtInt(computed ?? b.finishedTubes) : <span className="text-slate-300">–</span>}
-                </TD>
-                <TD>
-                  {hasData ? (
-                    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
-                      <CheckCircle2 className="w-3 h-3" /> Đã nhập
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">
-                      <CircleDashed className="w-3 h-3" /> Chưa nhập
-                    </span>
-                  )}
-                </TD>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 /* --------------------------------- Panel --------------------------------- */
 
-export default function LenMenPanel({ tab }) {
+export default function LenMenPanel({ tab, materials, actorId, setNote }) {
   const [batches, setBatches] = useState([]);
-  const [config, setConfig] = useState(() => parseDensityConfig({}));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filters, setFilters] = useState({ q: "", month: "ALL", strain: "ALL", status: "ALL", page: 1 });
 
   const load = useCallback(async () => {
     try {
-      const [rows, settings] = await Promise.all([fetchBatches(), fetchLenmenSettings()]);
+      const rows = await fetchBatches();
       setBatches(rows);
-      setConfig(parseDensityConfig(settings));
       setError("");
     } catch (e) {
       setError(e.message || String(e));
@@ -272,26 +208,21 @@ export default function LenMenPanel({ tab }) {
     [batches]
   );
 
-  const isDensityTab = tab === "lenmen-density";
-
   const filtered = useMemo(() => {
     const q = filters.q.trim().toLowerCase();
-    let rows = batches.filter((b) => {
+    const rows = batches.filter((b) => {
       if (filters.month !== "ALL" && b.productionBatch !== filters.month) return false;
       if (filters.strain !== "ALL" && canonicalStrainName(b.rawMaterial) !== filters.strain) return false;
       if (q && !`${b.lotNumber || ""} ${b.rawMaterial || ""}`.toLowerCase().includes(q)) return false;
-      if (!isDensityTab && filters.status !== "ALL") {
+      if (filters.status !== "ALL") {
         if (filters.status === "INFECTED") return b.isInfected;
         if (filters.status === "PASS") return !b.isInfected;
         return b.prepStatus === filters.status;
       }
       return true;
     });
-    if (isDensityTab) {
-      rows = rows.filter((b) => isDensityEligible(b.productionBatch, config.cutoffMonth, config.cutoffYear));
-    }
     return sortBatchesNewestFirst(rows);
-  }, [batches, filters, isDensityTab, config]);
+  }, [batches, filters]);
 
   const pageRows = filtered.slice((filters.page - 1) * PAGE_SIZE, filters.page * PAGE_SIZE);
   const setPage = (page) => setFilters((f) => ({ ...f, page }));
@@ -317,7 +248,7 @@ export default function LenMenPanel({ tab }) {
 
   // Tổng quan tính thẳng từ toàn bộ lô đã nạp, không lọc theo bộ lọc của Danh sách lô —
   // báo cáo phải phản ánh toàn cảnh, không phụ thuộc người dùng đang lọc gì.
-  if (tab === "lenmen-overview") return <LenMenOverview batches={batches} />;
+  if (tab === "lenmen-overview") return <LenMenOverview batches={batches} materials={materials} actorId={actorId} setNote={setNote} />;
 
   if (tab === "lenmen-khsx") {
     return <EmptyCard>Kế hoạch sản xuất đang được chuyển sang, tạm thời dùng ở hệ thống cũ.</EmptyCard>;
@@ -325,13 +256,8 @@ export default function LenMenPanel({ tab }) {
 
   return (
     <>
-      <FilterBar
-        months={months} strains={strains} filters={filters} setFilters={setFilters}
-        showStatus={!isDensityTab}
-      />
-      {isDensityTab
-        ? <DensityTable rows={pageRows} config={config} />
-        : <BatchTable rows={pageRows} />}
+      <FilterBar months={months} strains={strains} filters={filters} setFilters={setFilters} />
+      <BatchTable rows={pageRows} />
       <Pagination total={filtered.length} page={filters.page} setPage={setPage} />
     </>
   );
