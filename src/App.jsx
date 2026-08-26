@@ -780,7 +780,7 @@ function Connected({ session, profile }) {
                     <MaterialTable rows={rows} status={tab} onEdit={editField} onRemove={removeRec}
                       onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
                       canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
-                      onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} />
+                      onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} setNote={setNote} />
                   </>
                 );
               })()}
@@ -1270,8 +1270,414 @@ function NLFilterBar({ loQuery, setLoQuery, statusTagFilter, setStatusTagFilter,
 }
 
 /* ---------------- Bảng NL ---------------- */
-function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy }) {
-  const [open, setOpen] = useState({});
+
+// <td> tham gia chọn vùng kiểu Excel (xem MaterialGroupTable) — tách thành component đứng
+// riêng ở module scope để giữ nguyên identity giữa các lần render (định nghĩa component bên
+// trong 1 hàm render khác sẽ khiến React unmount/remount lại <td> mỗi lần re-render, làm mất
+// focus đang gõ dở trong ô).
+function SelectableTd({ selected, showHandle, onCellDown, onCellEnter, onHandleDown, className = "", children }) {
+  return (
+    <td className={`relative ${className} ${selected ? "ring-1 ring-inset ring-blue-500 bg-blue-50/70" : ""}`}
+      onMouseDown={onCellDown} onMouseEnter={onCellEnter}>
+      {children}
+      {showHandle && (
+        <span onMouseDown={onHandleDown} title="Kéo để điền xuống các chai bên dưới"
+          className="absolute right-0 bottom-0 w-2 h-2 bg-blue-600 border border-white cursor-crosshair z-10" />
+      )}
+    </td>
+  );
+}
+
+// Parse 1 giá trị dán vào theo đúng kiểu cột — trả {ok:false} nếu không hợp lệ (bị bỏ qua,
+// không lưu giá trị rác). Ngày nhận cả "YYYY-MM-DD" (dán lại từ chính bảng) lẫn "D/M/YYYY"
+// (dán từ Excel kiểu Việt Nam).
+function parsePasteValue(col, raw, row) {
+  const s = String(raw ?? "").trim();
+  if (col.type === "number") {
+    if (s === "") return { ok: true, value: null };
+    const n = num(s);
+    return n == null ? { ok: false } : { ok: true, value: n };
+  }
+  if (col.type === "date") {
+    if (s === "") return { ok: true, value: null };
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return { ok: true, value: s };
+    const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m) {
+      const d = parseInt(m[1], 10), mo = parseInt(m[2], 10); let y = parseInt(m[3], 10);
+      if (y < 100) y += 2000;
+      if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31)
+        return { ok: true, value: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}` };
+    }
+    return { ok: false };
+  }
+  if (col.type === "select") {
+    if (s === "") return { ok: true, value: "" };
+    const match = col.optionsFor(row).find((o) => o.toLowerCase() === s.toLowerCase());
+    return match ? { ok: true, value: match } : { ok: false };
+  }
+  return { ok: true, value: s }; // text
+}
+
+/** 1 bảng con (1 lô) — tách riêng khỏi MaterialTable vì cần state chọn vùng (hook), không gọi
+ * được bên trong .map(). Thêm chọn ô/vùng + Ctrl+C/Ctrl+V + kéo điền (fill handle) kiểu Excel
+ * cho các cột sửa được — CHỈ trong phạm vi lô này (không kéo/dán xuyên nhiều lô), vì mỗi lô là
+ * 1 <table> HTML riêng. Vẫn gọi đúng `onEdit` sẵn có cho từng ô — không viết lại logic lưu. */
+function MaterialGroupTable({
+  groupKey, list, status, roGeneral, roQcFields, canRowAction, showReason, reasonLabel,
+  onEdit, onRemove, onSoftDelete, onRestore, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy,
+  nameOf, setNote,
+}) {
+  const [open, setOpenSelf] = useState(true);
+  const isOpen = open;
+  const tenNL = list[0]?.tenNL, chung = list[0]?.chung;
+
+  // Cột tham gia chọn/copy/dán, ĐÚNG thứ tự hiển thị và ĐÚNG điều kiện quyền đang có trong
+  // JSX bên dưới — không tạo luật quyền mới.
+  const EDITABLE_COLUMNS = useMemo(() => {
+    const cols = [];
+    if (!roGeneral) cols.push({ key: "thoiGianThu", type: "date" });
+    if (!roGeneral) cols.push({ key: "loChung", type: "text" });
+    if (!roGeneral) cols.push({ key: "vDich", type: "number" });
+    if (!roQcFields) cols.push({ key: "camQuan", type: "text" });
+    if (!roQcFields) cols.push({ key: "pH", type: "number" });
+    if (!roQcFields) cols.push({ key: "mdNhan", type: "number" });
+    if (!roQcFields) cols.push({ key: "mdSH", type: "number" });
+    if (!roQcFields) cols.push({ key: "tyLeBaoTu", type: "number" });
+    if (!roQcFields) cols.push({ key: "nhiemKhuan", type: "select", optionsFor: (row) => ["Đạt", ...(row.strain === "clausii" ? ["Đạt (sub)"] : []), "Không đạt"] });
+    if (!roQcFields) cols.push({ key: "nhiemConNao", type: "select", optionsFor: () => ["Gram dương", "Gram dương sinh bào tử", "Gram âm"] });
+    if (!roQcFields) cols.push({ key: "ghiChu", type: "text" });
+    return cols;
+  }, [roGeneral, roQcFields]);
+  const colIdx = (key) => EDITABLE_COLUMNS.findIndex((c) => c.key === key);
+  const getCellValue = (row, col) => { const v = row[col.key]; return v == null ? "" : v; };
+
+  // sel: {r0,c0,r1,c1} chỉ số trong list/EDITABLE_COLUMNS, KHÔNG cần chuẩn hoá thứ tự khi lưu —
+  // chuẩn hoá 1 lần lúc dùng (bounds()).
+  const [sel, setSel] = useState(null);
+  const dragRef = useRef({ mode: null });
+  const bounds = sel && {
+    r0: Math.min(sel.r0, sel.r1), r1: Math.max(sel.r0, sel.r1),
+    c0: Math.min(sel.c0, sel.c1), c1: Math.max(sel.c0, sel.c1),
+  };
+  const isSelected = (r, c) => !!bounds && r >= bounds.r0 && r <= bounds.r1 && c >= bounds.c0 && c <= bounds.c1;
+  const isHandle = (r, c) => !!bounds && bounds.r0 === bounds.r1 && bounds.c0 === bounds.c1 && r === bounds.r0 && c === bounds.c0;
+
+  useEffect(() => {
+    const onUp = () => {
+      if (dragRef.current.mode === "fill") {
+        const { fillCol, fillSourceRow, fillSourceValue } = dragRef.current;
+        const col = EDITABLE_COLUMNS[fillCol];
+        const b = bounds;
+        if (col && b) {
+          for (let r = b.r0; r <= b.r1; r++) {
+            if (r === fillSourceRow || !list[r]) continue;
+            onEdit(list[r].id, col.key, fillSourceValue);
+          }
+        }
+      }
+      if (dragRef.current.mode) document.body.style.userSelect = ""; // xem ghi chú ở startSelect
+      dragRef.current = { mode: null };
+    };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bounds, list, EDITABLE_COLUMNS]);
+
+  const startSelect = (r, c) => {
+    dragRef.current = { mode: "select", anchor: { r, c } };
+    setSel({ r0: r, c0: c, r1: r, c1: c });
+    // KHÔNG tự ý .focus() vào div bọc ngoài — ô vừa bấm luôn có sẵn input/select bên trong,
+    // trình duyệt đã tự đưa focus vào đúng input đó. Cướp focus sang div sẽ làm gõ chữ (đặc
+    // biệt gõ tiếng Việt có dấu) bị rớt/lỗi vì bàn phím gõ vào div thay vì vào input.
+    // Tắt bôi đen chữ mặc định của trình duyệt trong lúc kéo — nếu không, kéo chuột bắt đầu từ
+    // trong 1 ô input sẽ bị trình duyệt hiểu là "bôi đen chữ trong ô đó" thay vì "quét chọn
+    // nhiều ô", nên vùng chọn không quét được sang ô khác. Bật lại ngay khi thả chuột (onUp).
+    document.body.style.userSelect = "none";
+  };
+  const extendSelect = (r, c) => {
+    if (dragRef.current.mode === "select") {
+      setSel({ r0: dragRef.current.anchor.r, c0: dragRef.current.anchor.c, r1: r, c1: c });
+    } else if (dragRef.current.mode === "fill" && c === dragRef.current.fillCol) {
+      setSel({
+        r0: Math.min(dragRef.current.fillSourceRow, r), c0: c,
+        r1: Math.max(dragRef.current.fillSourceRow, r), c1: c,
+      });
+    }
+  };
+  const startFill = (e, r, c) => {
+    e.stopPropagation();
+    const col = EDITABLE_COLUMNS[c];
+    dragRef.current = { mode: "fill", fillCol: c, fillSourceRow: r, fillSourceValue: getCellValue(list[r], col) };
+    document.body.style.userSelect = "none";
+  };
+
+  const doCopy = async () => {
+    if (!bounds) return;
+    const lines = [];
+    for (let r = bounds.r0; r <= bounds.r1; r++) {
+      const cells = [];
+      for (let c = bounds.c0; c <= bounds.c1; c++) cells.push(String(getCellValue(list[r], EDITABLE_COLUMNS[c])));
+      lines.push(cells.join("\t"));
+    }
+    try { await navigator.clipboard.writeText(lines.join("\n")); }
+    catch { setNote("Không copy được — trình duyệt chặn quyền truy cập clipboard."); }
+  };
+  const doPaste = async () => {
+    if (!bounds) return;
+    let text;
+    try { text = await navigator.clipboard.readText(); }
+    catch { setNote("Không đọc được clipboard — trình duyệt chặn quyền, thử lại hoặc cấp quyền clipboard cho trang."); return; }
+    if (!text) return;
+    const grid = text.replace(/\r/g, "").split("\n").filter((l, i, arr) => !(i === arr.length - 1 && l === "")).map((l) => l.split("\t"));
+    const singleCell = grid.length === 1 && grid[0].length === 1;
+    const nRows = singleCell ? (bounds.r1 - bounds.r0 + 1) : grid.length;
+    const nCols = singleCell ? (bounds.c1 - bounds.c0 + 1) : grid[0].length;
+    let ok = 0, fail = 0;
+    for (let dr = 0; dr < nRows; dr++) {
+      const r = bounds.r0 + dr;
+      if (r >= list.length) break;
+      for (let dc = 0; dc < nCols; dc++) {
+        const c = bounds.c0 + dc;
+        if (c >= EDITABLE_COLUMNS.length) break;
+        const col = EDITABLE_COLUMNS[c];
+        const raw = singleCell ? grid[0][0] : grid[dr]?.[dc];
+        const parsed = parsePasteValue(col, raw, list[r]);
+        if (parsed.ok) { onEdit(list[r].id, col.key, parsed.value); ok++; } else fail++;
+      }
+    }
+    if (fail > 0) setNote(`Đã dán ${ok} ô, bỏ qua ${fail} ô do giá trị không hợp lệ với cột đó.`);
+    setSel({
+      r0: bounds.r0, c0: bounds.c0,
+      r1: Math.min(bounds.r0 + nRows - 1, list.length - 1),
+      c1: Math.min(bounds.c0 + nCols - 1, EDITABLE_COLUMNS.length - 1),
+    });
+  };
+  const doClear = () => {
+    if (!bounds) return;
+    for (let r = bounds.r0; r <= bounds.r1; r++) {
+      if (!list[r]) continue;
+      for (let c = bounds.c0; c <= bounds.c1; c++) {
+        const col = EDITABLE_COLUMNS[c];
+        onEdit(list[r].id, col.key, col.type === "text" ? "" : null);
+      }
+    }
+  };
+  // Mọi ô luôn có sẵn input/select đang mở (không có chế độ "chọn nhưng chưa gõ" riêng như
+  // Excel thật) — nên Backspace/Delete/phím mũi tên PHẢI để trình duyệt xử lý bình thường
+  // (xoá 1 ký tự, di chuyển con trỏ trong ô) khi đang chọn ĐÚNG 1 ô, nếu không sẽ phá luôn
+  // thao tác gõ chữ thường. Chỉ bắt các phím này khi đang chọn THẬT SỰ nhiều ô (vùng), lúc đó
+  // không ai gõ chữ vào nhiều ô cùng lúc nên không xung đột.
+  const isRange = bounds && (bounds.r0 !== bounds.r1 || bounds.c0 !== bounds.c1);
+  const onKeyDown = (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === "c") { e.preventDefault(); doCopy(); }
+    else if (mod && e.key.toLowerCase() === "v") { e.preventDefault(); doPaste(); }
+    else if (isRange && (e.key === "Delete" || e.key === "Backspace")) { e.preventDefault(); doClear(); }
+  };
+
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
+      <div className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-50 hover:bg-slate-100">
+        <button onClick={() => setOpenSelf((s) => !s)}
+          className="flex-1 min-w-0 flex items-center gap-2 text-left">
+          {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+          <span className="font-mono text-sm font-medium">{groupKey}</span>
+          <span className="text-xs text-slate-500">· {tenNL} {chung} · {list.length} chai</span>
+        </button>
+        {canRowAction && status === "cho-kqkn" && <AddBottleInline lo={groupKey} onAdd={onAddBottle} />}
+      </div>
+      {isOpen && (
+        <div tabIndex={-1} onKeyDown={onKeyDown} className="overflow-x-auto focus:outline-none">
+          <table className="w-full text-xs whitespace-nowrap">
+            <thead className="bg-white text-slate-400 border-b border-slate-100 text-left">
+              <tr>
+                {["STT","Số lô","Thời gian thu","Lô chủng","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
+                  h ? <th key={i} className="px-3 py-2 font-medium">{h}</th> : null)}
+                <th className="px-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((r, rowIdx) => {
+                const st = statusOf(r);
+                const warnBaoTu = r.tyLeBaoTu != null && r.tyLeBaoTu > 100;
+                const warnPh = r.pH != null && (r.pH < 5 || r.pH > 9);
+                const qcRed = st.status === "cho-kqkn" && st.qcDays != null && st.qcDays >= QC_RED_DAYS;
+                const qcPastDeadline = st.status === "cho-kqkn" && st.qcDays != null && st.qcDays >= QC_DEADLINE_DAYS;
+                const hanTraKQ = st.status === "cho-kqkn" && r.thoiGianThu
+                  ? new Date(new Date(r.thoiGianThu).setDate(new Date(r.thoiGianThu).getDate() + QC_DEADLINE_DAYS)).toLocaleDateString("vi-VN")
+                  : null;
+                const cellProps = (key) => ({
+                  selected: isSelected(rowIdx, colIdx(key)), showHandle: isHandle(rowIdx, colIdx(key)),
+                  onCellDown: () => startSelect(rowIdx, colIdx(key)), onCellEnter: () => extendSelect(rowIdx, colIdx(key)),
+                  onHandleDown: (e) => startFill(e, rowIdx, colIdx(key)),
+                });
+                return (
+                  <tr key={r.id} title={qcPastDeadline ? `Đã quá hạn trả KQ QC (${st.qcDays} ngày kể từ thời gian thu)` : undefined}
+                    className={`border-b border-slate-50 hover:bg-slate-50/60 ${qcRed ? "bg-red-200 hover:bg-red-200" : ""}`}>
+                    <td className="px-3 py-1.5 text-slate-400">{r.stt}</td>
+                    <td className="px-3 py-1.5 font-mono">{r.soLo || "–"}</td>
+                    {roGeneral ? (
+                      <td className="px-2 py-1 text-slate-600">{r.thoiGianThu ? new Date(r.thoiGianThu).toLocaleDateString("vi-VN") : "–"}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("thoiGianThu")} className="px-2 py-1 text-slate-600">
+                        <input type="date" value={r.thoiGianThu || ""}
+                          onChange={(e)=>{ const v = e.target.value || null; list.forEach((x)=>onEdit(x.id,"thoiGianThu", v)); }}
+                          title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
+                          className="text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+                      </SelectableTd>
+                    )}
+                    {roGeneral ? (
+                      <td className="px-2 py-1">{r.loChung || "–"}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("loChung")} className="px-2 py-1">
+                        <EditText v={r.loChung} commitOnBlur w="w-16"
+                          title="Áp dụng cho cả lô — các chai cùng lô luôn chung 1 lô chủng"
+                          on={(x)=>{ list.forEach((row)=>onEdit(row.id,"loChung",x)); }} />
+                      </SelectableTd>
+                    )}
+                    {roGeneral ? (
+                      <td className="px-2 py-1 text-right">{fmt(r.vDich,1)}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("vDich")} className="px-2 py-1 text-right">
+                        <EditNum v={r.vDich} on={(x)=>onEdit(r.id,"vDich",x)} />
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className="px-2 py-1">{r.camQuan || "–"}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("camQuan")} className="px-2 py-1">
+                        <EditText v={r.camQuan} on={(x)=>onEdit(r.id,"camQuan",x)} w="w-20" />
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className={`px-2 py-1 text-right ${warnPh?"text-rose-600 font-medium":""}`}>
+                        {r.phInvalid ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-medium" title="Dữ liệu pH gốc bị lỗi, đã xoá — khác với chưa đo">⚠ sai</span> : fmt(r.pH,1)}
+                      </td>
+                    ) : (
+                      <SelectableTd {...cellProps("pH")} className={`px-2 py-1 text-right ${warnPh?"text-rose-600 font-medium":""}`}>
+                        <div className="flex items-center justify-end gap-1">
+                          {r.phInvalid && <span title="Dữ liệu pH gốc bị lỗi, đã xoá — cần nhập lại" className="text-rose-600 text-xs">⚠</span>}
+                          <EditNum v={r.pH} on={(x)=>onEdit(r.id,"pH",x)} w="w-14" />
+                        </div>
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className="px-2 py-1 text-right">{fmt(r.mdNhan)}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("mdNhan")} className="px-2 py-1 text-right">
+                        <EditNum v={r.mdNhan} on={(x)=>onEdit(r.id,"mdNhan",x)} />
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className="px-2 py-1 text-right">{r.mdSH==null?<span className="text-slate-300">thiếu</span>:fmt(r.mdSH)}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("mdSH")} className="px-2 py-1 text-right">
+                        <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} />
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>
+                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className="px-2 py-1">{r.nhiemKhuan || "–"}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("nhiemKhuan")} className="px-2 py-1">
+                        <div className="flex items-center gap-1.5">
+                          <select value={r.nhiemKhuan || ""} onChange={(e)=>onEdit(r.id,"nhiemKhuan",e.target.value)}
+                            className={`text-xs border rounded px-1.5 py-1 ${st.needsNhiemConNao ? "border-rose-400 bg-rose-50" : st.chuaQC ? "border-amber-300 bg-amber-50" : "border-slate-200"}`}>
+                            <option value="">– chưa QC –</option>
+                            <option value="Đạt">Đạt</option>
+                            {r.strain === "clausii" && <option value="Đạt (sub)">Đạt (sub)</option>}
+                            <option value="Không đạt">Không đạt</option>
+                          </select>
+                          {qcPastDeadline && (
+                            <span title={`Hạn trả KQ: ${hanTraKQ}`}
+                              className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${qcRed ? "bg-rose-600 text-white font-semibold" : "bg-amber-100 text-amber-700"}`}>
+                              Quá hạn {st.qcDays}d
+                            </span>
+                          )}
+                        </div>
+                      </SelectableTd>
+                    )}
+                    {roQcFields ? (
+                      <td className="px-2 py-1">{r.nhiemConNao || "–"}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("nhiemConNao")} className="px-2 py-1">
+                        <div className="flex flex-col gap-0.5">
+                          <select value={r.nhiemConNao || ""} onChange={(e)=>onEdit(r.id,"nhiemConNao",e.target.value)}
+                            className={`text-xs border rounded px-1.5 py-1 disabled:bg-slate-50 disabled:text-slate-400 ${st.needsNhiemConNao ? "border-rose-400 bg-rose-50" : "border-slate-200"}`}>
+                            <option value="">– chọn –</option>
+                            <option value="Gram dương">Gram dương</option>
+                            <option value="Gram dương sinh bào tử">Gram dương sinh bào tử</option>
+                            <option value="Gram âm">Gram âm</option>
+                          </select>
+                          {r.nhiemConNao && (
+                            <span className={`text-[10px] whitespace-nowrap ${st.needsGhiChu ? "text-rose-600 font-semibold" : "text-amber-600"}`}>
+                              {st.needsGhiChu ? "⚠ Bắt buộc ghi rõ tên VK vào Ghi chú" : "Ghi rõ tên VK vào Ghi chú"}
+                            </span>
+                          )}
+                          {st.needsNhiemConNao && (
+                            <span className="text-[10px] text-rose-600 font-semibold whitespace-nowrap">⚠ Bắt buộc chọn con nhiễm</span>
+                          )}
+                        </div>
+                      </SelectableTd>
+                    )}
+                    <td className="px-2 py-1.5"><div className="flex items-center gap-1"><LoaiBadge strain={r.strain} loai={st.loai} />{st.expired && <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">Quá hạn</span>}{st.nearExpiry && <span className="text-[11px] px-2 py-0.5 rounded-full bg-red-600 text-white font-medium">Sắp hết hạn</span>}</div></td>
+                    {roQcFields ? (
+                      <td className="px-2 py-1">{r.ghiChu || "–"}</td>
+                    ) : (
+                      <SelectableTd {...cellProps("ghiChu")} className="px-2 py-1">
+                        <EditText v={r.ghiChu} on={(x)=>onEdit(r.id,"ghiChu",x)} w="w-32" err={st.needsGhiChu} commitOnBlur={st.needsGhiChu} />
+                      </SelectableTd>
+                    )}
+                    {showReason && <td className="px-3 py-1.5 text-rose-700 whitespace-normal max-w-xs">{(st.reasons || []).join(" · ") || "–"}</td>}
+                    {status === "da-pha" && <td className="px-3 py-1.5"><span className="font-medium text-sky-700">{r.phaProduct || "–"}</span>{r.phaMe && <span className="text-slate-400"> · mẻ {r.phaMe}</span>}</td>}
+                    {status === "da-pha" && <td className="px-3 py-1.5 text-slate-500">{r.daPhaAt ? new Date(r.daPhaAt).toLocaleString("vi-VN") : "–"}</td>}
+                    <td className="px-3 py-1.5 text-slate-500">{nameOf(r.createdBy)}</td>
+                    <td className="px-3 py-1.5 text-slate-500">{nameOf(r.updatedBy)}</td>
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                      {!canRowAction ? null : status === "cho-pha" ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
+                          <button onClick={()=>onSoftDelete(r.id)} title="Chuyển vào thùng rác" className="text-slate-300 hover:text-rose-500"><X className="w-4 h-4" /></button>
+                        </div>
+                      ) : status === "cho-kqkn" ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
+                          <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      ) : status === "cho-xoa" ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={()=>onRestore(r.id)} title="Khôi phục" className="text-slate-400 hover:text-emerald-600"><RotateCcw className="w-3.5 h-3.5" /></button>
+                          <button onClick={()=>{ if (window.confirm(`Xoá vĩnh viễn số lô ${r.soLo}? Không thể hoàn tác.`)) onRemove(r.id); }} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      ) : status === "cho-xu-ly" ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
+                          <button onClick={()=>{ if (window.confirm(`Chuyển số lô ${r.soLo} sang "Đã huỷ" ngay?`)) onEdit(r.id, "huyThuCong", true); }}
+                            title="Chuyển sang Đã huỷ" className="text-slate-400 hover:text-rose-600"><Ban className="w-3.5 h-3.5" /></button>
+                          <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
+                      ) : (
+                        <button onClick={()=>onRemove(r.id)} className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy, setNote }) {
   const ro = status === "da-pha" || status === "da-huy" || status === "cho-xoa";
   // Thời gian thu/Lô chủng/V dịch: chỉ admin sửa được (dữ liệu nhập liệu/logistics, không phải "kết
   // quả kiểm nghiệm"). Cảm quan/pH/MĐ nhãn/MĐ SH/Bào tử %/Nhiễm khuẩn/Nhiễm con nào/Ghi chú: admin
@@ -1317,152 +1723,13 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
 
   return (
     <div className="space-y-2">
-      {groups.map(([key, list]) => {
-        const isOpen = open[key] ?? true;
-        const tenNL = list[0]?.tenNL, chung = list[0]?.chung;
-        return (
-          <div key={key} className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-            <div className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-50 hover:bg-slate-100">
-              <button onClick={() => setOpen((s) => ({ ...s, [key]: !isOpen }))}
-                className="flex-1 min-w-0 flex items-center gap-2 text-left">
-                {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
-                <span className="font-mono text-sm font-medium">{key}</span>
-                <span className="text-xs text-slate-500">· {tenNL} {chung} · {list.length} chai</span>
-              </button>
-              {canRowAction && status === "cho-kqkn" && <AddBottleInline lo={key} onAdd={onAddBottle} />}
-            </div>
-            {isOpen && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs whitespace-nowrap">
-                  <thead className="bg-white text-slate-400 border-b border-slate-100 text-left">
-                    <tr>
-                      {["STT","Số lô","Thời gian thu","Lô chủng","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
-                        h ? <th key={i} className="px-3 py-2 font-medium">{h}</th> : null)}
-                      <th className="px-2"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {list.map((r) => {
-                      const st = statusOf(r);
-                      const warnBaoTu = r.tyLeBaoTu != null && r.tyLeBaoTu > 100;
-                      const warnPh = r.pH != null && (r.pH < 5 || r.pH > 9);
-                      const qcRed = st.status === "cho-kqkn" && st.qcDays != null && st.qcDays >= QC_RED_DAYS;
-                      const qcPastDeadline = st.status === "cho-kqkn" && st.qcDays != null && st.qcDays >= QC_DEADLINE_DAYS;
-                      const hanTraKQ = st.status === "cho-kqkn" && r.thoiGianThu
-                        ? new Date(new Date(r.thoiGianThu).setDate(new Date(r.thoiGianThu).getDate() + QC_DEADLINE_DAYS)).toLocaleDateString("vi-VN")
-                        : null;
-                      return (
-                        <tr key={r.id} title={qcPastDeadline ? `Đã quá hạn trả KQ QC (${st.qcDays} ngày kể từ thời gian thu)` : undefined}
-                          className={`border-b border-slate-50 hover:bg-slate-50/60 ${qcRed ? "bg-red-200 hover:bg-red-200" : ""}`}>
-                          <td className="px-3 py-1.5 text-slate-400">{r.stt}</td>
-                          <td className="px-3 py-1.5 font-mono">{r.soLo || "–"}</td>
-                          <td className="px-2 py-1 text-slate-600">
-                            {roGeneral ? (r.thoiGianThu ? new Date(r.thoiGianThu).toLocaleDateString("vi-VN") : "–") : (
-                              <input type="date" value={r.thoiGianThu || ""}
-                                onChange={(e)=>{ const v = e.target.value || null; list.forEach((x)=>onEdit(x.id,"thoiGianThu", v)); }}
-                                title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
-                                className="text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
-                            )}
-                          </td>
-                          <td className="px-2 py-1">{roGeneral ? (r.loChung || "–") : <EditText v={r.loChung} on={(x)=>onEdit(r.id,"loChung",x)} w="w-16" />}</td>
-                          <td className="px-2 py-1 text-right">{roGeneral ? fmt(r.vDich,1) : <EditNum v={r.vDich} on={(x)=>onEdit(r.id,"vDich",x)} />}</td>
-                          <td className="px-2 py-1">{roQcFields ? (r.camQuan || "–") : <EditText v={r.camQuan} on={(x)=>onEdit(r.id,"camQuan",x)} w="w-20" />}</td>
-                          <td className={`px-2 py-1 text-right ${warnPh?"text-rose-600 font-medium":""}`}>
-                            {roQcFields ? (
-                              r.phInvalid ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-medium" title="Dữ liệu pH gốc bị lỗi, đã xoá — khác với chưa đo">⚠ sai</span> : fmt(r.pH,1)
-                            ) : (
-                              <div className="flex items-center justify-end gap-1">
-                                {r.phInvalid && <span title="Dữ liệu pH gốc bị lỗi, đã xoá — cần nhập lại" className="text-rose-600 text-xs">⚠</span>}
-                                <EditNum v={r.pH} on={(x)=>onEdit(r.id,"pH",x)} w="w-14" />
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-2 py-1 text-right">{roQcFields ? fmt(r.mdNhan) : <EditNum v={r.mdNhan} on={(x)=>onEdit(r.id,"mdNhan",x)} />}</td>
-                          <td className="px-2 py-1 text-right">{roQcFields ? (r.mdSH==null?<span className="text-slate-300">thiếu</span>:fmt(r.mdSH)) : <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} />}</td>
-                          <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{roQcFields ? (r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)) : <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />}</td>
-                          <td className="px-2 py-1">
-                            {roQcFields ? (r.nhiemKhuan || "–") : (
-                              <div className="flex items-center gap-1.5">
-                                <select value={r.nhiemKhuan || ""} onChange={(e)=>onEdit(r.id,"nhiemKhuan",e.target.value)}
-                                  className={`text-xs border rounded px-1.5 py-1 ${st.needsNhiemConNao ? "border-rose-400 bg-rose-50" : st.chuaQC ? "border-amber-300 bg-amber-50" : "border-slate-200"}`}>
-                                  <option value="">– chưa QC –</option>
-                                  <option value="Đạt">Đạt</option>
-                                  {r.strain === "clausii" && <option value="Đạt (sub)">Đạt (sub)</option>}
-                                  <option value="Không đạt">Không đạt</option>
-                                </select>
-                                {qcPastDeadline && (
-                                  <span title={`Hạn trả KQ: ${hanTraKQ}`}
-                                    className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${qcRed ? "bg-rose-600 text-white font-semibold" : "bg-amber-100 text-amber-700"}`}>
-                                    Quá hạn {st.qcDays}d
-                                  </span>
-                                )}
-                              </div>)}
-                          </td>
-                          <td className="px-2 py-1">
-                            {roQcFields ? (r.nhiemConNao || "–") : (
-                              <div className="flex flex-col gap-0.5">
-                                <select value={r.nhiemConNao || ""} onChange={(e)=>onEdit(r.id,"nhiemConNao",e.target.value)}
-                                  className={`text-xs border rounded px-1.5 py-1 disabled:bg-slate-50 disabled:text-slate-400 ${st.needsNhiemConNao ? "border-rose-400 bg-rose-50" : "border-slate-200"}`}>
-                                  <option value="">– chọn –</option>
-                                  <option value="Gram dương">Gram dương</option>
-                                  <option value="Gram dương sinh bào tử">Gram dương sinh bào tử</option>
-                                  <option value="Gram âm">Gram âm</option>
-                                </select>
-                                {r.nhiemConNao && (
-                                  <span className={`text-[10px] whitespace-nowrap ${st.needsGhiChu ? "text-rose-600 font-semibold" : "text-amber-600"}`}>
-                                    {st.needsGhiChu ? "⚠ Bắt buộc ghi rõ tên VK vào Ghi chú" : "Ghi rõ tên VK vào Ghi chú"}
-                                  </span>
-                                )}
-                                {st.needsNhiemConNao && (
-                                  <span className="text-[10px] text-rose-600 font-semibold whitespace-nowrap">⚠ Bắt buộc chọn con nhiễm</span>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-2 py-1.5"><div className="flex items-center gap-1"><LoaiBadge strain={r.strain} loai={st.loai} />{st.expired && <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700">Quá hạn</span>}{st.nearExpiry && <span className="text-[11px] px-2 py-0.5 rounded-full bg-red-600 text-white font-medium">Sắp hết hạn</span>}</div></td>
-                          <td className="px-2 py-1">{roQcFields ? (r.ghiChu || "–") : <EditText v={r.ghiChu} on={(x)=>onEdit(r.id,"ghiChu",x)} w="w-32" err={st.needsGhiChu} commitOnBlur={st.needsGhiChu} />}</td>
-                          {showReason && <td className="px-3 py-1.5 text-rose-700 whitespace-normal max-w-xs">{(st.reasons || []).join(" · ") || "–"}</td>}
-                          {status === "da-pha" && <td className="px-3 py-1.5"><span className="font-medium text-sky-700">{r.phaProduct || "–"}</span>{r.phaMe && <span className="text-slate-400"> · mẻ {r.phaMe}</span>}</td>}
-                          {status === "da-pha" && <td className="px-3 py-1.5 text-slate-500">{r.daPhaAt ? new Date(r.daPhaAt).toLocaleString("vi-VN") : "–"}</td>}
-                          <td className="px-3 py-1.5 text-slate-500">{nameOf(r.createdBy)}</td>
-                          <td className="px-3 py-1.5 text-slate-500">{nameOf(r.updatedBy)}</td>
-                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                            {!canRowAction ? null : status === "cho-pha" ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
-                                <button onClick={()=>onSoftDelete(r.id)} title="Chuyển vào thùng rác" className="text-slate-300 hover:text-rose-500"><X className="w-4 h-4" /></button>
-                              </div>
-                            ) : status === "cho-kqkn" ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
-                                <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
-                              </div>
-                            ) : status === "cho-xoa" ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <button onClick={()=>onRestore(r.id)} title="Khôi phục" className="text-slate-400 hover:text-emerald-600"><RotateCcw className="w-3.5 h-3.5" /></button>
-                                <button onClick={()=>{ if (window.confirm(`Xoá vĩnh viễn số lô ${r.soLo}? Không thể hoàn tác.`)) onRemove(r.id); }} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
-                              </div>
-                            ) : status === "cho-xu-ly" ? (
-                              <div className="flex items-center justify-end gap-2">
-                                <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
-                                <button onClick={()=>{ if (window.confirm(`Chuyển số lô ${r.soLo} sang "Đã huỷ" ngay?`)) onEdit(r.id, "huyThuCong", true); }}
-                                  title="Chuyển sang Đã huỷ" className="text-slate-400 hover:text-rose-600"><Ban className="w-3.5 h-3.5" /></button>
-                                <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
-                              </div>
-                            ) : (
-                              <button onClick={()=>onRemove(r.id)} className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        );
-      })}
+      {groups.map(([key, list]) => (
+        <MaterialGroupTable key={key} groupKey={key} list={list} status={status}
+          roGeneral={roGeneral} roQcFields={roQcFields} canRowAction={canRowAction}
+          showReason={showReason} reasonLabel={reasonLabel} nameOf={nameOf} setNote={setNote}
+          onEdit={onEdit} onRemove={onRemove} onSoftDelete={onSoftDelete} onRestore={onRestore}
+          onAddBottle={onAddBottle} onForceDaPha={onForceDaPha} onForceChoXuLy={onForceChoXuLy} onForceDaHuy={onForceDaHuy} />
+      ))}
     </div>
   );
 }
