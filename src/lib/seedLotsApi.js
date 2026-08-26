@@ -172,6 +172,7 @@ export function dueCheckpoints(lot, stabilityPoints, protocol, now = new Date())
 const MOVEMENT_FIELDS = [
   ["id", "id"], ["seedLotId", "seed_lot_id"], ["loai", "loai"], ["ngay", "ngay"],
   ["soOng", "so_ong"], ["mucDich", "muc_dich"], ["nguoiThucHien", "nguoi_thuc_hien"],
+  ["nguoiKiemTra", "nguoi_kiem_tra"], ["nguoiPheDuyet", "nguoi_phe_duyet"],
   ["mucDichLoai", "muc_dich_loai"], ["loSanXuat", "lo_san_xuat"],
   ["ghiChu", "ghi_chu"], ["createdBy", "created_by"], ["createdAt", "created_at"],
 ];
@@ -179,13 +180,15 @@ const movementToCamel = toCamel(MOVEMENT_FIELDS);
 
 export const MOVEMENT_LABEL = { nhap: "Nhập kho", xuat: "Xuất kho", huy: "Huỷ" };
 
-// 3 mục đích xuất kho. Xuất để SẢN XUẤT bắt buộc có số lô: kết quả kiểm nghiệm của lô
+// 4 mục đích xuất kho. Xuất để SẢN XUẤT bắt buộc có số lô: kết quả kiểm nghiệm của lô
 // đó sau này phải truy ngược được về đúng ống chủng đã dùng, nếu không thì lô nhiễm
 // khuẩn sẽ không biết truy từ đâu. DB cũng chặn (constraint lenmen_movement_sx_can_lo).
+// Xem migration_lenmen_giong_mucdich2.sql — chạy migration đó trước khi đổi mảng này.
 export const MUC_DICH_XUAT = [
-  { value: "san_xuat", label: "Sản xuất", canLo: true },
+  { value: "theo_doi_dod", label: "Theo dõi DOD", canLo: false },
   { value: "nghien_cuu", label: "Nghiên cứu", canLo: false },
-  { value: "gui_kiem_nghiem", label: "Gửi kiểm nghiệm", canLo: false },
+  { value: "san_xuat", label: "Sản xuất", canLo: true },
+  { value: "huy", label: "Huỷ", canLo: false },
 ];
 export const MUC_DICH_LABEL = Object.fromEntries(MUC_DICH_XUAT.map((m) => [m.value, m.label]));
 
@@ -198,6 +201,24 @@ export async function fetchMovements(seedLotId) {
     .order("id", { ascending: false });
   if (error) throw error;
   return data.map(movementToCamel);
+}
+
+/** Danh sách tên đã từng ghi ở TỪNG vai trò riêng (xuất/nhập, kiểm tra, phê duyệt) — dùng làm
+ * gợi ý autocomplete cho đúng ô tương ứng. Tách riêng theo cột, không gộp chung: ai chỉ từng
+ * đứng tên "Người xuất" thì KHÔNG gợi ý ở ô "Người kiểm tra"/"Người phê duyệt" — chỉ khi
+ * người đó đã từng thật sự đứng tên ở vai trò nào thì mới hiện gợi ý ở đúng ô đó. */
+export async function fetchMovementPeople() {
+  const { data, error } = await supabase
+    .from("lenmen_seed_movements")
+    .select("nguoi_thuc_hien, nguoi_kiem_tra, nguoi_phe_duyet");
+  if (error) throw error;
+  const uniqSorted = (values) =>
+    [...new Set(values.map((v) => (v || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, "vi"));
+  return {
+    thucHien: uniqSorted(data.map((r) => r.nguoi_thuc_hien)),
+    kiemTra: uniqSorted(data.map((r) => r.nguoi_kiem_tra)),
+    pheDuyet: uniqSorted(data.map((r) => r.nguoi_phe_duyet)),
+  };
 }
 
 /**
@@ -215,6 +236,8 @@ export async function recordMovement(move, actorId) {
     muc_dich_loai: move.mucDichLoai || null,
     lo_san_xuat: move.loSanXuat ? String(move.loSanXuat).trim() : null,
     nguoi_thuc_hien: move.nguoiThucHien || null,
+    nguoi_kiem_tra: move.nguoiKiemTra || null,
+    nguoi_phe_duyet: move.nguoiPheDuyet || null,
     ghi_chu: move.ghiChu || null,
   };
   if (actorId) payload.created_by = actorId;
@@ -226,6 +249,30 @@ export async function recordMovement(move, actorId) {
     .from("lenmen_seed_lots").select("*").eq("id", move.seedLotId).single();
   if (e2) throw e2;
   return lotToCamel(data);
+}
+
+/**
+ * Sửa 1 lượt xuất/nhập đã lưu — khắc phục lỡ gõ sai mục đích/lô sản xuất/tên người ký.
+ * CỐ TÌNH không cho sửa "soOng" (số ống) hay "loai" (xuất/nhập/huỷ): trigger cộng/trừ tồn
+ * kho chỉ chạy lúc INSERT (xem migration_lenmen_giong_kho.sql), sửa tay 2 trường này ở đây
+ * sẽ làm tồn kho lệch khỏi lịch sử mà không ai biết. Nhập sai số lượng thì tạo 1 lượt mới để
+ * điều chỉnh, không sửa ngược lịch sử. Chỉ admin gọi được — chặn ở RLS
+ * (lenmen_seed_movements_update_admin, xem migration_lenmen_giong_sua_phieu.sql), không chỉ
+ * ở giao diện.
+ */
+export async function updateMovement(id, patch) {
+  const payload = {
+    ngay: patch.ngay || new Date().toISOString().slice(0, 10),
+    muc_dich: patch.mucDich || null,
+    muc_dich_loai: patch.mucDichLoai || null,
+    lo_san_xuat: patch.loSanXuat ? String(patch.loSanXuat).trim() : null,
+    nguoi_thuc_hien: patch.nguoiThucHien || null,
+    nguoi_kiem_tra: patch.nguoiKiemTra || null,
+    nguoi_phe_duyet: patch.nguoiPheDuyet || null,
+    ghi_chu: patch.ghiChu || null,
+  };
+  const { error } = await supabase.from("lenmen_seed_movements").update(payload).eq("id", id);
+  if (error) throw error;
 }
 
 /** Tồn kho gộp theo từng kho, để hiện thẻ tổng quan đầu trang. */
