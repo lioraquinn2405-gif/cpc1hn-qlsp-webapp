@@ -6,16 +6,17 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Plus, Loader2, ChevronRight, ChevronDown, AlertTriangle, Search,
-  Snowflake, Tag, ArrowUpFromLine, ArrowDownToLine, X, BarChart3, List, Trash2,
+  Snowflake, Tag, ArrowUpFromLine, ArrowDownToLine, X, BarChart3, List, Trash2, Printer, Pencil,
 } from "lucide-react";
 import { fetchLenmenSettings } from "./lib/lenmenApi.js";
 import {
   fetchSeedLots, insertSeedLot, fetchStability, saveStabilityPoint,
-  fetchMovements, recordMovement, summarizeByKho, fetchAllStability, fetchStrains, giaiMaChung, huyLot,
+  fetchMovements, fetchMovementPeople, recordMovement, updateMovement, summarizeByKho, fetchAllStability, fetchStrains, giaiMaChung, huyLot,
   parseProtocol, dueCheckpoints, monthsSince,
   DIEU_KIEN_LUU_LABEL, STABILITY_CRITERIA, MOVEMENT_LABEL, MUC_DICH_XUAT, MUC_DICH_LABEL,
 } from "./lib/seedLotsApi.js";
 import SeedLabelModal from "./SeedLabel.jsx";
+import { openPhieuPrint, renderPhieuHTML, tenLoaiCuaLo, NGUOI_THUC_HIEN_LABEL } from "./SeedIssueForm.jsx";
 import SeedReport from "./SeedReport.jsx";
 import SeedStabilityChart from "./SeedStabilityChart.jsx";
 
@@ -126,9 +127,10 @@ function AddLotForm({ onAdd }) {
 
 /* ----------------------------- Xuất / nhập kho ----------------------------- */
 
-function MovementModal({ lot, loai, onClose, onDone }) {
+function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTra: [], pheDuyet: [] }, onNewPeople, onClose, onDone }) {
   const [form, setForm] = useState({
     soOng: "", ngay: new Date().toISOString().slice(0, 10), mucDich: "", nguoiThucHien: "", ghiChu: "",
+    nguoiKiemTra: "", nguoiPheDuyet: "",
     mucDichLoai: "san_xuat", loSanXuat: "",
   });
   const [saving, setSaving] = useState(false);
@@ -136,10 +138,21 @@ function MovementModal({ lot, loai, onClose, onDone }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const laXuat = loai !== "nhap";
   const canLoSanXuat = laXuat && form.mucDichLoai === "san_xuat";
+  const nguoiLabel = NGUOI_THUC_HIEN_LABEL[laXuat ? "xuat" : "nhap"];
 
-  const submit = async (e) => {
-    e.preventDefault();
-    if (canLoSanXuat && !form.loSanXuat.trim()) { setError("Xuất để sản xuất thì phải điền số lô."); return; }
+  // Dùng chung cho Lưu lẫn In phiếu — cả 2 đều thật sự lưu (In phiếu KHÔNG submit form nên
+  // required trên input không tự chặn, phải kiểm tay). Phiếu thiếu số lô sản xuất bắt buộc
+  // thì không cho lưu cũng không cho in, tránh in ra 1 tờ GMP thiếu đúng thông tin bắt buộc.
+  const validate = () => {
+    if (!form.soOng || Number(form.soOng) <= 0) { setError("Số ống là bắt buộc."); return false; }
+    if (canLoSanXuat && !form.loSanXuat.trim()) {
+      setError('Xuất để "Sản xuất" thì phải điền Số lô sản xuất.');
+      return false;
+    }
+    return true;
+  };
+
+  const doSave = async (openWin) => {
     setSaving(true); setError("");
     try {
       const updated = await recordMovement({
@@ -147,10 +160,39 @@ function MovementModal({ lot, loai, onClose, onDone }) {
         mucDichLoai: laXuat ? form.mucDichLoai : null,
         loSanXuat: canLoSanXuat ? form.loSanXuat : null,
       });
+      // Cửa sổ in đã mở SẴN trước bước lưu (đồng bộ trong lúc bấm) — chỉ còn ghi nội dung
+      // vào, không mở mới ở đây, vì mở sau 1 bước async thế này sẽ bị trình duyệt chặn popup.
+      if (openWin) {
+        openWin.document.write(renderPhieuHTML({
+          loai, ten: tenLoaiCuaLo(lot, fallbackTen),
+          maChung: lot.maChung, soLo: lot.soLo, nsx: lot.ngaySanXuat, hd: lot.hanSuDung,
+          soLuong: form.soOng, ngay: form.ngay,
+          mucDichText: laXuat ? MUC_DICH_LABEL[form.mucDichLoai] : form.mucDich,
+          mucDichLoai: laXuat ? form.mucDichLoai : null,
+          loSanXuat: canLoSanXuat ? form.loSanXuat : null,
+          nguoiThucHien: form.nguoiThucHien, nguoiKiemTra: form.nguoiKiemTra, nguoiPheDuyet: form.nguoiPheDuyet,
+        }));
+        openWin.document.close();
+      }
+      onNewPeople?.({ thucHien: form.nguoiThucHien, kiemTra: form.nguoiKiemTra, pheDuyet: form.nguoiPheDuyet });
       onDone(updated);
       onClose();
-    } catch (err) { setError(err.message || String(err)); }
+    } catch (err) {
+      if (openWin) openWin.close(); // đóng luôn cửa sổ trắng đã mở nếu lưu lỗi
+      setError(err.message || String(err));
+    }
     setSaving(false);
+  };
+
+  const submit = (e) => { e.preventDefault(); if (validate()) doSave(null); };
+
+  const inPhieu = () => {
+    if (!validate()) return;
+    // Mở cửa sổ NGAY trong lúc bấm (đồng bộ) rồi mới lưu — không đợi lưu xong mới mở, vì
+    // mở sau await sẽ bị trình duyệt coi là popup tự bật và chặn.
+    const w = window.open("", "_blank");
+    if (!w) { setError("Trình duyệt chặn cửa sổ bật lên — cho phép pop-up rồi thử lại."); return; }
+    doSave(w);
   };
 
   return (
@@ -204,15 +246,41 @@ function MovementModal({ lot, loai, onClose, onDone }) {
               <input value={form.mucDich} onChange={set("mucDich")} placeholder="Cấy chuyền từ lô 010725"
                 className={`block mt-1 ${inputCls} w-full`} /></div>
           )}
-          <div><label className="text-xs text-slate-500">Người thực hiện</label>
-            <input value={form.nguoiThucHien} onChange={set("nguoiThucHien")} className={`block mt-1 ${inputCls} w-full`} /></div>
+          {/* Gợi ý tên — tách riêng theo đúng vai trò đã từng đứng tên, không trộn lẫn: ai
+              chỉ từng là Người xuất thì không hiện gợi ý ở ô Kiểm tra/Phê duyệt. Gõ để lọc,
+              hoặc bấm mũi tên trong ô để xổ ra chọn hẳn. Vẫn gõ được tên mới bình thường —
+              danh sách chỉ để gợi ý, không giới hạn giá trị được nhập. */}
+          <datalist id="nguoi-thuc-hien-list">
+            {people.thucHien.map((p) => <option key={p} value={p} />)}
+          </datalist>
+          <datalist id="nguoi-kiem-tra-list">
+            {people.kiemTra.map((p) => <option key={p} value={p} />)}
+          </datalist>
+          <datalist id="nguoi-phe-duyet-list">
+            {people.pheDuyet.map((p) => <option key={p} value={p} />)}
+          </datalist>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div><label className="text-xs text-slate-500">{nguoiLabel}</label>
+              <input list="nguoi-thuc-hien-list" value={form.nguoiThucHien} onChange={set("nguoiThucHien")} className={`block mt-1 ${inputCls} w-full`} /></div>
+            <div><label className="text-xs text-slate-500">Người kiểm tra</label>
+              <input list="nguoi-kiem-tra-list" value={form.nguoiKiemTra} onChange={set("nguoiKiemTra")} className={`block mt-1 ${inputCls} w-full`} /></div>
+            <div><label className="text-xs text-slate-500">Người phê duyệt</label>
+              <input list="nguoi-phe-duyet-list" value={form.nguoiPheDuyet} onChange={set("nguoiPheDuyet")} className={`block mt-1 ${inputCls} w-full`} /></div>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            3 ô {nguoiLabel}/Người kiểm tra/Người phê duyệt chỉ để in tên rõ trên phiếu — chữ ký vẫn ký tay lên bản in.
+          </p>
           {error && <p className="text-xs text-rose-600">{error}</p>}
         </div>
         <div className="px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 px-3">Huỷ</button>
+          <button type="button" onClick={inPhieu} disabled={saving}
+            className="flex items-center gap-2 text-slate-700 text-sm px-4 py-2 rounded-md border border-slate-300 hover:bg-slate-50 disabled:opacity-50">
+            <Printer className="w-4 h-4" /> In phiếu
+          </button>
           <button type="submit" disabled={saving}
             className={`flex items-center gap-2 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50 ${laXuat ? "bg-slate-800 hover:bg-slate-900" : "bg-emerald-600 hover:bg-emerald-700"}`}>
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />} {MOVEMENT_LABEL[loai]}
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} Lưu
           </button>
         </div>
       </form>
@@ -220,14 +288,127 @@ function MovementModal({ lot, loai, onClose, onDone }) {
   );
 }
 
-function MovementLog({ moves }) {
+/** Sửa 1 lượt xuất/nhập đã lưu — CHỈ admin (nút gọi modal này đã bị ẩn với người khác ở
+ * MovementLog, và RLS chặn ở DB nếu ai đó cố gọi thẳng API). Không cho sửa Loại/Số ống —
+ * xem lý do ở updateMovement trong lib/seedLotsApi.js. */
+function EditMovementModal({ move, lot, people = { thucHien: [], kiemTra: [], pheDuyet: [] }, onNewPeople, onClose, onDone }) {
+  const [form, setForm] = useState({
+    ngay: move.ngay || new Date().toISOString().slice(0, 10),
+    mucDich: move.mucDich || "", mucDichLoai: move.mucDichLoai || "san_xuat", loSanXuat: move.loSanXuat || "",
+    nguoiThucHien: move.nguoiThucHien || "", nguoiKiemTra: move.nguoiKiemTra || "", nguoiPheDuyet: move.nguoiPheDuyet || "",
+    ghiChu: move.ghiChu || "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const laXuat = move.loai !== "nhap";
+  const canLoSanXuat = laXuat && form.mucDichLoai === "san_xuat";
+  const nguoiLabel = NGUOI_THUC_HIEN_LABEL[laXuat ? "xuat" : "nhap"];
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (canLoSanXuat && !form.loSanXuat.trim()) { setError('Xuất để "Sản xuất" thì phải điền Số lô sản xuất.'); return; }
+    setSaving(true); setError("");
+    try {
+      await updateMovement(move.id, {
+        ...form,
+        mucDichLoai: laXuat ? form.mucDichLoai : null,
+        loSanXuat: canLoSanXuat ? form.loSanXuat : null,
+      });
+      onNewPeople?.({ thucHien: form.nguoiThucHien, kiemTra: form.nguoiKiemTra, pheDuyet: form.nguoiPheDuyet });
+      onDone();
+      onClose();
+    } catch (err) { setError(err.message || String(err)); }
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-lg border border-slate-200 w-full max-w-md">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+          <div className="font-semibold text-sm">Sửa lượt {MOVEMENT_LABEL[move.loai]} — lô {lot.soLo}</div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-md p-2">
+            {MOVEMENT_LABEL[move.loai]} <b className="text-slate-700">{move.soOng} ống</b> — Loại và Số ống không sửa
+            được ở đây (ảnh hưởng tồn kho đã tính) — nhập sai số lượng thì tạo 1 lượt mới để điều chỉnh.
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Ngày</label>
+            <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} />
+          </div>
+          {laXuat ? (
+            <>
+              <div>
+                <label className="text-xs text-slate-500">Mục đích xuất kho *</label>
+                <select value={form.mucDichLoai} onChange={set("mucDichLoai")} className={`block mt-1 ${inputCls} w-full bg-white`}>
+                  {MUC_DICH_XUAT.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+              </div>
+              {canLoSanXuat && (
+                <div>
+                  <label className="text-xs text-slate-500">Số lô sản xuất *</label>
+                  <input required value={form.loSanXuat} onChange={set("loSanXuat")} placeholder="030825BSM"
+                    className={`block mt-1 ${inputCls} w-full font-mono`} />
+                </div>
+              )}
+              <div>
+                <label className="text-xs text-slate-500">Ghi chú thêm</label>
+                <input value={form.mucDich} onChange={set("mucDich")} placeholder="không bắt buộc"
+                  className={`block mt-1 ${inputCls} w-full`} />
+              </div>
+            </>
+          ) : (
+            <div><label className="text-xs text-slate-500">Nhập từ đâu</label>
+              <input value={form.mucDich} onChange={set("mucDich")} placeholder="Cấy chuyền từ lô 010725"
+                className={`block mt-1 ${inputCls} w-full`} /></div>
+          )}
+          <datalist id="edit-nguoi-thuc-hien-list">{people.thucHien.map((p) => <option key={p} value={p} />)}</datalist>
+          <datalist id="edit-nguoi-kiem-tra-list">{people.kiemTra.map((p) => <option key={p} value={p} />)}</datalist>
+          <datalist id="edit-nguoi-phe-duyet-list">{people.pheDuyet.map((p) => <option key={p} value={p} />)}</datalist>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div><label className="text-xs text-slate-500">{nguoiLabel}</label>
+              <input list="edit-nguoi-thuc-hien-list" value={form.nguoiThucHien} onChange={set("nguoiThucHien")} className={`block mt-1 ${inputCls} w-full`} /></div>
+            <div><label className="text-xs text-slate-500">Người kiểm tra</label>
+              <input list="edit-nguoi-kiem-tra-list" value={form.nguoiKiemTra} onChange={set("nguoiKiemTra")} className={`block mt-1 ${inputCls} w-full`} /></div>
+            <div><label className="text-xs text-slate-500">Người phê duyệt</label>
+              <input list="edit-nguoi-phe-duyet-list" value={form.nguoiPheDuyet} onChange={set("nguoiPheDuyet")} className={`block mt-1 ${inputCls} w-full`} /></div>
+          </div>
+          {error && <p className="text-xs text-rose-600">{error}</p>}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 px-3">Huỷ</button>
+          <button type="submit" disabled={saving}
+            className="flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50">
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} Lưu thay đổi
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MovementLog({ moves, lot, fallbackTen, isAdmin, onEdit }) {
   if (!moves.length) return <div className="text-sm text-slate-400 py-2">Chưa có lượt xuất/nhập nào.</div>;
+  const inLai = (m) => {
+    const ok = openPhieuPrint({
+      loai: m.loai, ten: tenLoaiCuaLo(lot, fallbackTen),
+      maChung: lot.maChung, soLo: lot.soLo, nsx: lot.ngaySanXuat, hd: lot.hanSuDung,
+      soLuong: m.soOng, ngay: m.ngay,
+      mucDichText: m.mucDichLoai ? MUC_DICH_LABEL[m.mucDichLoai] : m.mucDich,
+      mucDichLoai: m.mucDichLoai, loSanXuat: m.loSanXuat,
+      nguoiThucHien: m.nguoiThucHien, nguoiKiemTra: m.nguoiKiemTra, nguoiPheDuyet: m.nguoiPheDuyet,
+    });
+    if (!ok) alert("Trình duyệt chặn cửa sổ bật lên — cho phép pop-up rồi thử lại.");
+  };
   return (
     <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
       <table className="w-full text-xs whitespace-nowrap">
         <thead className="bg-slate-50">
           <tr>
-            {["Ngày", "Loại", "Số ống", "Mục đích", "Lô sản xuất", "Người thực hiện"].map((h) => (
+            {["Ngày", "Loại", "Số ống", "Mục đích", "Lô sản xuất", "Người thực hiện", ""].map((h) => (
               <th key={h} className="px-3 py-2 text-left font-medium text-[11px] text-slate-400">{h}</th>
             ))}
           </tr>
@@ -248,6 +429,20 @@ function MovementLog({ moves }) {
               </td>
               <td className="px-3 py-1.5 font-mono">{m.loSanXuat || "–"}</td>
               <td className="px-3 py-1.5">{m.nguoiThucHien || "–"}</td>
+              <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                <div className="flex items-center justify-end gap-2">
+                  {isAdmin && (
+                    <button onClick={() => onEdit(m)} title="Sửa lượt này (chỉ admin)" className="text-slate-400 hover:text-slate-700">
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {m.loai !== "huy" && (
+                    <button onClick={() => inLai(m)} title="In lại phiếu" className="text-slate-400 hover:text-slate-700">
+                      <Printer className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -449,7 +644,7 @@ function StabilityMatrix({ lot, points, protocol, onSave }) {
 
 /* --------------------------------- Panel --------------------------------- */
 
-export default function SeedLotPanel() {
+export default function SeedLotPanel({ isAdmin }) {
   const [lots, setLots] = useState([]);
   const [protocol, setProtocol] = useState([]);
   const [stability, setStability] = useState({});
@@ -467,9 +662,13 @@ export default function SeedLotPanel() {
   const [labelLot, setLabelLot] = useState(null);
   const [moveCtx, setMoveCtx] = useState(null);   // { lot, loai }
   const [huyLotCtx, setHuyLotCtx] = useState(null);
+  const [editCtx, setEditCtx] = useState(null); // { move, lot } — sửa 1 lượt xuất/nhập đã lưu (chỉ admin)
   const [view, setView] = useState("kho");       // "kho" | "baocao"
   const [allStability, setAllStability] = useState([]);
   const [strains, setStrains] = useState([]);
+  // Gợi ý tên cho 3 ô ký — tách riêng theo đúng vai trò, ai chỉ từng đứng "Người xuất" thì
+  // không gợi ý sang ô "Người kiểm tra"/"Người phê duyệt".
+  const [people, setPeople] = useState({ thucHien: [], kiemTra: [], pheDuyet: [] });
 
   const load = useCallback(async () => {
     try {
@@ -486,6 +685,26 @@ export default function SeedLotPanel() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Tách riêng khỏi load() chính: nếu chưa chạy migration_lenmen_giong_phieu.sql (thiếu cột
+  // nguoi_kiem_tra/nguoi_phe_duyet) thì chỉ mất gợi ý tên, không kéo sập cả trang.
+  useEffect(() => {
+    fetchMovementPeople().then(setPeople).catch(() => {});
+  }, []);
+  // Cho thêm ngay tên vừa gõ vào đúng danh sách theo vai trò, khỏi phải tải lại trang mới
+  // dùng lại được trong cùng phiên làm việc (vd xuất 2 lô liên tiếp, đổi người kiểm tra khác
+  // nhau). "roleNames" dạng { thucHien, kiemTra, pheDuyet } — khớp đúng field nào mới thêm
+  // vào đúng danh sách đó, không trộn vai trò.
+  const addPeople = useCallback((roleNames) => {
+    setPeople((prev) => {
+      const next = { ...prev };
+      for (const key of ["thucHien", "kiemTra", "pheDuyet"]) {
+        const v = (roleNames[key] || "").trim();
+        if (v && !next[key].includes(v)) next[key] = [...next[key], v].sort((a, b) => a.localeCompare(b, "vi"));
+      }
+      return next;
+    });
+  }, []);
 
   // Chỉ nạp mốc theo dõi + nhật ký kho khi mở lô ra xem — sổ có thể vài trăm lô.
   const toggle = async (lot) => {
@@ -744,7 +963,8 @@ export default function SeedLotPanel() {
 
                     <div className="border-t border-slate-200 p-4">
                       <div className="font-semibold text-sm mb-2">Nhật ký xuất / nhập</div>
-                      <MovementLog moves={movements[lot.id] || []} />
+                      <MovementLog moves={movements[lot.id] || []} lot={lot} fallbackTen={loaiTheoMa[lot.maChung]}
+                        isAdmin={isAdmin} onEdit={(move) => setEditCtx({ move, lot })} />
                     </div>
 
                     <StabilityMatrix lot={lot} points={stability[lot.id] || []} protocol={protocol} onSave={savePoint} />
@@ -764,8 +984,17 @@ export default function SeedLotPanel() {
           onDone={(updated) => afterMove(updated)} />
       )}
       {moveCtx && (
-        <MovementModal lot={moveCtx.lot} loai={moveCtx.loai}
+        <MovementModal lot={moveCtx.lot} loai={moveCtx.loai} fallbackTen={loaiTheoMa[moveCtx.lot.maChung]}
+          people={people} onNewPeople={addPeople}
           onClose={() => setMoveCtx(null)} onDone={afterMove} />
+      )}
+      {editCtx && (
+        <EditMovementModal move={editCtx.move} lot={editCtx.lot} people={people} onNewPeople={addPeople}
+          onClose={() => setEditCtx(null)}
+          onDone={async () => {
+            const moves = await fetchMovements(editCtx.lot.id);
+            setMovements((m) => ({ ...m, [editCtx.lot.id]: moves }));
+          }} />
       )}
     </>
   );

@@ -792,7 +792,7 @@ function Connected({ session, profile }) {
               {tab === "sp" && <ProductPanel products={products} setProducts={setProducts} setNote={setNote} isAdmin={isAdmin} canEdit={canEditProduction} />}
               {tab === "sp-history" && <ProductionHistoryPanel products={products} setNote={setNote} focusMaSP={spFocus?.maSP} focusTs={spFocus?.ts} canEdit={canEditProduction} />}
               {LENMEN_TABS.some((t) => t.key === tab) && <LenMenPanel tab={tab} materials={materials} actorId={actorId} setNote={setNote} />}
-              {tab === "giong" && <SeedLotPanel />}
+              {tab === "giong" && <SeedLotPanel isAdmin={isAdmin} />}
               {tab === "users" && isAdmin && <UsersPanel profiles={profiles} onUpdate={updateUserProfile} currentUserId={actorId} onCreated={reload} />}
               {tab === "account" && <AccountSettingsPanel session={session} profile={profile} />}
             </>
