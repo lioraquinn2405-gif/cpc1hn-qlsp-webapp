@@ -1,0 +1,772 @@
+// Menu "Bảo quản chủng giống" — thay file Excel "File tổng SỐ LÔ" + các sheet theo dõi
+// độ ổn định (DOD-*/SUBTILIS/CLAUSII) + sheet Lọc tính lịch đến hạn kiểm.
+//
+// Hai kho vật lý: tủ −20°C và nitơ lỏng. Mỗi lô nằm ở đúng một kho, có số ống tồn,
+// xuất/nhập ghi vào nhật ký (DB tự cộng trừ tồn — xem migration_lenmen_giong_kho.sql).
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  Plus, Loader2, ChevronRight, ChevronDown, AlertTriangle, Search,
+  Snowflake, Tag, ArrowUpFromLine, ArrowDownToLine, X, BarChart3, List, Trash2,
+} from "lucide-react";
+import { fetchLenmenSettings } from "./lib/lenmenApi.js";
+import {
+  fetchSeedLots, insertSeedLot, fetchStability, saveStabilityPoint,
+  fetchMovements, recordMovement, summarizeByKho, fetchAllStability, fetchStrains, giaiMaChung, huyLot,
+  parseProtocol, dueCheckpoints, monthsSince,
+  DIEU_KIEN_LUU_LABEL, STABILITY_CRITERIA, MOVEMENT_LABEL, MUC_DICH_XUAT, MUC_DICH_LABEL,
+} from "./lib/seedLotsApi.js";
+import SeedLabelModal from "./SeedLabel.jsx";
+import SeedReport from "./SeedReport.jsx";
+import SeedStabilityChart from "./SeedStabilityChart.jsx";
+
+const inputCls = "border border-slate-300 rounded-md px-3 py-2 text-sm";
+const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("vi-VN") : "–");
+const KHO_KEYS = Object.keys(DIEU_KIEN_LUU_LABEL);
+
+/* ------------------------------ Tổng quan kho ------------------------------ */
+
+function KhoCards({ lots, active, setActive }) {
+  const sum = summarizeByKho(lots);
+  const cards = [
+    ...KHO_KEYS.map((k) => ({ key: k, label: DIEU_KIEN_LUU_LABEL[k], ...sum[k] })),
+    { key: "chua_ro", label: "Chưa gán kho", ...sum.chua_ro },
+  ];
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+      {cards.map((c) => {
+        const on = active === c.key;
+        return (
+          <button key={c.key} onClick={() => setActive(on ? "ALL" : c.key)}
+            className={`bg-white rounded-lg border p-4 text-left transition ${on ? "border-slate-800 ring-1 ring-slate-800" : "border-slate-200 hover:border-slate-300"}`}>
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <Snowflake className="w-3.5 h-3.5" /> {c.label}
+            </div>
+            <div className="text-base font-semibold text-slate-800 mt-1">{c.soOng.toLocaleString("vi-VN")} ống</div>
+            <div className="text-[11px] text-slate-400 mt-0.5">{c.soLo} lô</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------------------------- Thêm lô ống chủng ---------------------------- */
+
+function AddLotForm({ onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const empty = {
+    soLo: "", maChung: "", tenChung: "", dieuKienLuu: "am_20", ngaySanXuat: "",
+    nguonGoc: "", matDo: "", soOng: "", viTri: "", nguoiLam: "",
+    nhiemKhuan: "Đạt", doDongDeu: "Đạt", khaNangTaoBaoTu: "Đạt",
+  };
+  const [form, setForm] = useState(empty);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true); setError("");
+    try {
+      await onAdd({
+        ...form,
+        matDo: form.matDo === "" ? null : Number(form.matDo),
+        soOng: form.soOng === "" ? 0 : Number(form.soOng),
+        soOngBanDau: form.soOng === "" ? null : Number(form.soOng),
+      });
+      setForm(empty); setOpen(false);
+    } catch (err) { setError(err.message || String(err)); }
+    setSaving(false);
+  };
+
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)}
+        className="mb-3 flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm px-3 py-2 rounded-md">
+        <Plus className="w-4 h-4" /> Nhập lô chủng mới
+      </button>
+    );
+  }
+  return (
+    <form onSubmit={submit} className="mb-3 bg-white rounded-lg border border-slate-200 p-4 flex flex-wrap items-end gap-3">
+      <div><label className="text-xs text-slate-500">Số lô *</label>
+        <input required value={form.soLo} onChange={set("soLo")} placeholder="010526" className={`block mt-1 ${inputCls} w-28 font-mono`} /></div>
+      <div><label className="text-xs text-slate-500">Mã chủng *</label>
+        <input required value={form.maChung} onChange={set("maChung")} placeholder="PL01.3.G4" className={`block mt-1 ${inputCls} w-32 font-mono`} /></div>
+      <div><label className="text-xs text-slate-500">Tên chủng</label>
+        <input value={form.tenChung} onChange={set("tenChung")} placeholder="B.subtilis BH1" className={`block mt-1 ${inputCls} w-40`} /></div>
+      <div><label className="text-xs text-slate-500">Kho</label>
+        <select value={form.dieuKienLuu} onChange={set("dieuKienLuu")} className={`block mt-1 ${inputCls}`}>
+          {KHO_KEYS.map((k) => <option key={k} value={k}>{DIEU_KIEN_LUU_LABEL[k]}</option>)}
+        </select></div>
+      <div><label className="text-xs text-slate-500">Vị trí trong kho</label>
+        <input value={form.viTri} onChange={set("viTri")} placeholder="Tủ 2 – Ngăn 3 – Hộp A" className={`block mt-1 ${inputCls} w-44`} /></div>
+      <div><label className="text-xs text-slate-500">Số ống nhập</label>
+        <input inputMode="numeric" value={form.soOng} onChange={set("soOng")} className={`block mt-1 ${inputCls} w-24 text-right`} /></div>
+      <div><label className="text-xs text-slate-500">Ngày sản xuất</label>
+        <input type="date" value={form.ngaySanXuat} onChange={set("ngaySanXuat")} className={`block mt-1 ${inputCls}`} /></div>
+      <div><label className="text-xs text-slate-500">Nguồn gốc</label>
+        <input value={form.nguonGoc} onChange={set("nguonGoc")} placeholder="2200122.C3" className={`block mt-1 ${inputCls} w-36`} /></div>
+      <div><label className="text-xs text-slate-500">Mật độ (10⁹ CFU/ml)</label>
+        <input inputMode="decimal" value={form.matDo} onChange={set("matDo")} className={`block mt-1 ${inputCls} w-28 text-right`} /></div>
+      <div><label className="text-xs text-slate-500">Người làm</label>
+        <input value={form.nguoiLam} onChange={set("nguoiLam")} className={`block mt-1 ${inputCls} w-28`} /></div>
+      <div className="flex items-center gap-2">
+        <button type="submit" disabled={saving}
+          className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm px-4 py-2 rounded-md">
+          {saving && <Loader2 className="w-4 h-4 animate-spin" />} Lưu
+        </button>
+        <button type="button" onClick={() => { setOpen(false); setError(""); }} className="text-sm text-slate-500 hover:text-slate-700 px-2">Huỷ</button>
+      </div>
+      <p className="text-[11px] text-slate-400 w-full">Bỏ trống hạn dùng thì hệ thống tự tính NSX + 1 năm, đúng như nhãn đang in. Lưu xong bấm “Nhãn” để in nhãn ống và nhãn hộp.</p>
+      {error && <p className="text-xs text-rose-600 w-full">{error}</p>}
+    </form>
+  );
+}
+
+/* ----------------------------- Xuất / nhập kho ----------------------------- */
+
+function MovementModal({ lot, loai, onClose, onDone }) {
+  const [form, setForm] = useState({
+    soOng: "", ngay: new Date().toISOString().slice(0, 10), mucDich: "", nguoiThucHien: "", ghiChu: "",
+    mucDichLoai: "san_xuat", loSanXuat: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const laXuat = loai !== "nhap";
+  const canLoSanXuat = laXuat && form.mucDichLoai === "san_xuat";
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (canLoSanXuat && !form.loSanXuat.trim()) { setError("Xuất để sản xuất thì phải điền số lô."); return; }
+    setSaving(true); setError("");
+    try {
+      const updated = await recordMovement({
+        ...form, seedLotId: lot.id, loai,
+        mucDichLoai: laXuat ? form.mucDichLoai : null,
+        loSanXuat: canLoSanXuat ? form.loSanXuat : null,
+      });
+      onDone(updated);
+      onClose();
+    } catch (err) { setError(err.message || String(err)); }
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-lg border border-slate-200 w-full max-w-md">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+          <div className="font-semibold text-sm">{MOVEMENT_LABEL[loai]} — lô {lot.soLo}</div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="text-xs text-slate-500">
+            Tồn hiện tại: <span className="font-medium text-slate-800">{lot.soOng ?? 0} ống</span>
+            {" · "}{DIEU_KIEN_LUU_LABEL[lot.dieuKienLuu] || "chưa gán kho"}
+            {lot.viTri ? ` · ${lot.viTri}` : ""}
+          </div>
+          <div className="flex gap-3">
+            <div><label className="text-xs text-slate-500">Số ống *</label>
+              <input required inputMode="numeric" min="1" value={form.soOng} onChange={set("soOng")}
+                className={`block mt-1 ${inputCls} w-28 text-right`} /></div>
+            <div><label className="text-xs text-slate-500">Ngày</label>
+              <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+          </div>
+          {laXuat ? (
+            <>
+              <div>
+                <label className="text-xs text-slate-500">Mục đích xuất kho *</label>
+                <select value={form.mucDichLoai} onChange={set("mucDichLoai")} className={`block mt-1 ${inputCls} w-full bg-white`}>
+                  {MUC_DICH_XUAT.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+              </div>
+              {canLoSanXuat && (
+                <div>
+                  <label className="text-xs text-slate-500">Số lô sản xuất *</label>
+                  <input required value={form.loSanXuat} onChange={set("loSanXuat")} placeholder="030825BSM"
+                    className={`block mt-1 ${inputCls} w-full font-mono`} />
+                  <p className="text-[11px] text-amber-700 mt-1">
+                    Bắt buộc: kết quả kiểm nghiệm của lô này sau đó sẽ gắn ngược về ống chủng vừa xuất,
+                    để khi lô nhiễm khuẩn còn truy được nguyên nhân.
+                  </p>
+                </div>
+              )}
+              <div>
+                <label className="text-xs text-slate-500">Ghi chú thêm</label>
+                <input value={form.mucDich} onChange={set("mucDich")} placeholder="không bắt buộc"
+                  className={`block mt-1 ${inputCls} w-full`} />
+              </div>
+            </>
+          ) : (
+            <div><label className="text-xs text-slate-500">Nhập từ đâu</label>
+              <input value={form.mucDich} onChange={set("mucDich")} placeholder="Cấy chuyền từ lô 010725"
+                className={`block mt-1 ${inputCls} w-full`} /></div>
+          )}
+          <div><label className="text-xs text-slate-500">Người thực hiện</label>
+            <input value={form.nguoiThucHien} onChange={set("nguoiThucHien")} className={`block mt-1 ${inputCls} w-full`} /></div>
+          {error && <p className="text-xs text-rose-600">{error}</p>}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 px-3">Huỷ</button>
+          <button type="submit" disabled={saving}
+            className={`flex items-center gap-2 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50 ${laXuat ? "bg-slate-800 hover:bg-slate-900" : "bg-emerald-600 hover:bg-emerald-700"}`}>
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} {MOVEMENT_LABEL[loai]}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function MovementLog({ moves }) {
+  if (!moves.length) return <div className="text-sm text-slate-400 py-2">Chưa có lượt xuất/nhập nào.</div>;
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
+      <table className="w-full text-xs whitespace-nowrap">
+        <thead className="bg-slate-50">
+          <tr>
+            {["Ngày", "Loại", "Số ống", "Mục đích", "Lô sản xuất", "Người thực hiện"].map((h) => (
+              <th key={h} className="px-3 py-2 text-left font-medium text-[11px] text-slate-400">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {moves.map((m) => (
+            <tr key={m.id} className="border-t border-slate-100">
+              <td className="px-3 py-1.5">{fmtDate(m.ngay)}</td>
+              <td className="px-3 py-1.5">
+                <span className={`text-[11px] px-2 py-0.5 rounded-full ${m.loai === "nhap" ? "bg-emerald-100 text-emerald-700" : m.loai === "xuat" ? "bg-sky-100 text-sky-700" : "bg-rose-100 text-rose-700"}`}>
+                  {MOVEMENT_LABEL[m.loai]}
+                </span>
+              </td>
+              <td className="px-3 py-1.5 text-right font-medium">{m.loai === "nhap" ? "+" : "−"}{m.soOng}</td>
+              <td className="px-3 py-1.5 whitespace-normal">
+                {m.mucDichLoai ? MUC_DICH_LABEL[m.mucDichLoai] : (m.mucDich || "–")}
+                {m.mucDichLoai && m.mucDich ? <span className="text-slate-400"> · {m.mucDich}</span> : null}
+              </td>
+              <td className="px-3 py-1.5 font-mono">{m.loSanXuat || "–"}</td>
+              <td className="px-3 py-1.5">{m.nguoiThucHien || "–"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* --------------------------------- Huỷ lô --------------------------------- */
+
+function HuyModal({ lot, onClose, onDone }) {
+  // Mặc định huỷ hết số đang tồn — trường hợp thường gặp là bỏ cả lô quá hạn.
+  const [form, setForm] = useState({
+    soOng: String(lot.soOng ?? 0), ngay: new Date().toISOString().slice(0, 10),
+    lyDo: "", nguoiThucHien: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.lyDo.trim()) { setError("Phải ghi lý do huỷ."); return; }
+    setSaving(true); setError("");
+    try { onDone(await huyLot(lot, form)); onClose(); }
+    catch (err) { setError(err.message || String(err)); }
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-lg border border-slate-200 w-full max-w-md">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+          <div className="font-semibold text-sm">Huỷ lô {lot.soLo}</div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="bg-rose-50 border border-rose-200 rounded-md p-2.5 text-xs text-rose-700">
+            Huỷ là bỏ đi, khác với xuất dùng. Lô sẽ bị đánh dấu <b>Đã huỷ</b> và không xuất/nhập được nữa.
+            Nhật ký vẫn giữ nguyên vết.
+          </div>
+          <div className="flex gap-3">
+            <div><label className="text-xs text-slate-500">Số ống huỷ</label>
+              <input required inputMode="numeric" value={form.soOng} onChange={set("soOng")}
+                className={`block mt-1 ${inputCls} w-28 text-right`} />
+              <p className="text-[11px] text-slate-400 mt-0.5">Đang tồn {lot.soOng ?? 0}</p></div>
+            <div><label className="text-xs text-slate-500">Ngày huỷ</label>
+              <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+          </div>
+          <div><label className="text-xs text-slate-500">Lý do huỷ *</label>
+            <input required value={form.lyDo} onChange={set("lyDo")} placeholder="Quá hạn dùng / nhiễm / hỏng tủ…"
+              className={`block mt-1 ${inputCls} w-full`} /></div>
+          <div><label className="text-xs text-slate-500">Người thực hiện</label>
+            <input value={form.nguoiThucHien} onChange={set("nguoiThucHien")} className={`block mt-1 ${inputCls} w-full`} /></div>
+          {error && <p className="text-xs text-rose-600">{error}</p>}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 px-3">Huỷ bỏ</button>
+          <button type="submit" disabled={saving}
+            className="flex items-center gap-2 bg-rose-600 hover:bg-rose-700 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50">
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} Xác nhận huỷ
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* --------------------------- Ma trận độ ổn định --------------------------- */
+
+function StabilityMatrix({ lot, points, protocol, onSave }) {
+  // Bảng nhập trực tiếp: cột = mốc theo dõi, dòng = chỉ tiêu — đúng bố cục sheet DOD cũ,
+  // gõ thẳng vào ô thay vì mở form riêng cho từng mốc.
+  const [cols, setCols] = useState([]);
+  const [dirty, setDirty] = useState(new Set());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [mocMoi, setMocMoi] = useState("");
+
+  useEffect(() => {
+    setCols(points.map((p) => ({ ...p })));
+    setDirty(new Set());
+  }, [points]);
+
+  const due = dueCheckpoints(lot, points, protocol);
+
+  const setCell = (moc, field, value) => {
+    setCols((cs) => cs.map((c) => (c.mocThang === moc ? { ...c, [field]: value } : c)));
+    setDirty((d) => new Set(d).add(moc));
+  };
+
+  const themMoc = () => {
+    const m = Number(mocMoi);
+    if (!Number.isInteger(m) || m < 0) { setError("Mốc phải là số tháng, 0 = ban đầu."); return; }
+    if (cols.some((c) => c.mocThang === m)) { setError(`Mốc ${m} tháng đã có rồi.`); return; }
+    setError("");
+    setCols((cs) => [...cs, { mocThang: m, seedLotId: lot.id }].sort((a, b) => a.mocThang - b.mocThang));
+    setDirty((d) => new Set(d).add(m));
+    setMocMoi("");
+  };
+
+  const luu = async () => {
+    setSaving(true); setError("");
+    try {
+      for (const moc of dirty) {
+        const c = cols.find((x) => x.mocThang === moc);
+        if (c) await onSave({ ...c, seedLotId: lot.id });
+      }
+      setDirty(new Set());
+    } catch (e) { setError(e.message || String(e)); }
+    setSaving(false);
+  };
+
+  const cellCls = "w-full border border-transparent hover:border-slate-300 focus:border-emerald-400 focus:outline-none rounded px-1.5 py-1 text-xs text-right bg-transparent";
+  const DONG = [
+    { key: "me", label: "Mẻ", nguong: "", mono: true },
+    { key: "ngayKiem", label: "Ngày kiểm", nguong: "", type: "date" },
+    ...STABILITY_CRITERIA.map((c) => ({ key: c.key, label: c.label, nguong: c.nguong })),
+  ];
+
+  return (
+    <div className="bg-slate-50 border-t border-slate-200 p-4">
+      <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+        <div className="font-semibold text-sm">Theo dõi độ ổn định</div>
+        <div className="flex items-center gap-2 flex-wrap">
+          {due.length > 0 && (
+            <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+              <AlertTriangle className="w-3 h-3" />
+              Đến hạn: {due.map((d) => `${d.thang} tháng (${d.chi_tieu.join(", ")})`).join(" · ")}
+            </span>
+          )}
+          <input value={mocMoi} onChange={(e) => setMocMoi(e.target.value)} inputMode="numeric"
+            placeholder="mốc (tháng)" className="border border-slate-300 rounded-md px-2 py-1 text-xs w-28" />
+          <button onClick={themMoc} className="text-xs border border-slate-300 rounded-md px-2.5 py-1 bg-white hover:bg-slate-50">
+            + Thêm mốc
+          </button>
+          <button onClick={luu} disabled={saving || !dirty.size}
+            className="flex items-center gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white rounded-md px-3 py-1">
+            {saving && <Loader2 className="w-3 h-3 animate-spin" />}
+            Lưu bảng{dirty.size ? ` (${dirty.size})` : ""}
+          </button>
+        </div>
+      </div>
+
+      {cols.length === 0 ? (
+        <div className="text-sm text-slate-400 py-2">Chưa có mốc nào — nhập số tháng rồi bấm “Thêm mốc”.</div>
+      ) : (
+        <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
+          <table className="w-full text-xs whitespace-nowrap">
+            <thead className="bg-slate-50">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium text-[11px] text-slate-400">Chỉ tiêu</th>
+                <th className="px-3 py-2 text-left font-medium text-[11px] text-slate-400">Ngưỡng</th>
+                {cols.map((c) => (
+                  <th key={c.mocThang}
+                    className={`px-3 py-2 text-right font-medium text-[11px] ${dirty.has(c.mocThang) ? "text-emerald-700" : "text-slate-400"}`}>
+                    {c.mocThang === 0 ? "Ban đầu" : `${c.mocThang} tháng`}
+                    {dirty.has(c.mocThang) ? " •" : ""}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {DONG.map((d) => (
+                <tr key={d.key} className="border-t border-slate-100">
+                  <td className="px-3 py-1 text-slate-700">{d.label}</td>
+                  <td className="px-3 py-1 text-[11px] text-slate-400">{d.nguong || "–"}</td>
+                  {cols.map((c) => (
+                    <td key={c.mocThang} className="px-1 py-0.5">
+                      <input type={d.type || "text"} value={c[d.key] ?? ""}
+                        onChange={(e) => setCell(c.mocThang, d.key, e.target.value)}
+                        className={`${cellCls} ${d.mono ? "font-mono" : ""}`} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {error && <p className="text-xs text-rose-600 mt-2">{error}</p>}
+      {dirty.size > 0 && (
+        <p className="text-[11px] text-amber-700 mt-2">
+          Có {dirty.size} mốc đang sửa chưa lưu (đánh dấu •). Bấm “Lưu bảng” để ghi lại.
+        </p>
+      )}
+
+      {cols.length > 0 && (
+        <div className="bg-white rounded-lg border border-slate-200 p-4 mt-3">
+          <div className="font-semibold text-sm mb-2">Đồ thị độ ổn định</div>
+          <SeedStabilityChart points={points} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------------- Panel --------------------------------- */
+
+export default function SeedLotPanel() {
+  const [lots, setLots] = useState([]);
+  const [protocol, setProtocol] = useState([]);
+  const [stability, setStability] = useState({});
+  const [movements, setMovements] = useState({});
+  const [expanded, setExpanded] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [q, setQ] = useState("");
+  const [kho, setKho] = useState("ALL");
+  const [loai, setLoai] = useState("ALL");        // theo loài (danh mục chủng)
+  const [maChung, setMaChung] = useState("ALL");
+  const [tuNgay, setTuNgay] = useState("");       // lọc theo NSX
+  const [denNgay, setDenNgay] = useState("");
+  const [trangThai, setTrangThai] = useState("ALL");
+  const [labelLot, setLabelLot] = useState(null);
+  const [moveCtx, setMoveCtx] = useState(null);   // { lot, loai }
+  const [huyLotCtx, setHuyLotCtx] = useState(null);
+  const [view, setView] = useState("kho");       // "kho" | "baocao"
+  const [allStability, setAllStability] = useState([]);
+  const [strains, setStrains] = useState([]);
+
+  const load = useCallback(async () => {
+    try {
+      const [rows, settings, allMoc, dsChung] = await Promise.all([
+        fetchSeedLots(), fetchLenmenSettings(), fetchAllStability(), fetchStrains(),
+      ]);
+      setLots(rows);
+      setAllStability(allMoc);
+      setStrains(dsChung);
+      setProtocol(parseProtocol(settings));
+      setError("");
+    } catch (e) { setError(e.message || String(e)); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Chỉ nạp mốc theo dõi + nhật ký kho khi mở lô ra xem — sổ có thể vài trăm lô.
+  const toggle = async (lot) => {
+    if (expanded === lot.id) { setExpanded(null); return; }
+    setExpanded(lot.id);
+    if (!stability[lot.id]) {
+      const points = await fetchStability(lot.id);
+      setStability((s) => ({ ...s, [lot.id]: points }));
+    }
+    if (!movements[lot.id]) {
+      const moves = await fetchMovements(lot.id);
+      setMovements((m) => ({ ...m, [lot.id]: moves }));
+    }
+  };
+
+  const addLot = async (form) => {
+    const saved = await insertSeedLot(form);
+    setLots((prev) => [saved, ...prev]);
+  };
+
+  const savePoint = async (point) => {
+    const saved = await saveStabilityPoint(point);
+    setStability((s) => {
+      const list = (s[point.seedLotId] || []).filter((p) => p.mocThang !== saved.mocThang);
+      return { ...s, [point.seedLotId]: [...list, saved].sort((a, b) => a.mocThang - b.mocThang) };
+    });
+  };
+
+  // Tồn kho do trigger DB tính, nên lấy lại dòng lô đã cập nhật thay vì tự cộng trừ ở đây.
+  const afterMove = async (updatedLot) => {
+    setLots((prev) => prev.map((l) => (l.id === updatedLot.id ? updatedLot : l)));
+    const moves = await fetchMovements(updatedLot.id);
+    setMovements((m) => ({ ...m, [updatedLot.id]: moves }));
+  };
+
+  // Loài lấy từ danh mục chủng (lô không tự lưu loài, chỉ có mã chủng).
+  const loaiTheoMa = useMemo(
+    () => Object.fromEntries(strains.map((x) => [x.maChung, x.tenLoai || ""])), [strains]
+  );
+  const dsLoai = useMemo(
+    () => [...new Set(lots.map((l) => loaiTheoMa[l.maChung]).filter(Boolean))].sort(), [lots, loaiTheoMa]
+  );
+  const dsMaChung = useMemo(
+    () => [...new Set(lots.map((l) => l.maChung).filter(Boolean))].sort(), [lots]
+  );
+  const coLoc = kho !== "ALL" || loai !== "ALL" || maChung !== "ALL" || tuNgay || denNgay || trangThai !== "ALL" || q;
+  const xoaLoc = () => { setKho("ALL"); setLoai("ALL"); setMaChung("ALL"); setTuNgay(""); setDenNgay(""); setTrangThai("ALL"); setQ(""); };
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const homNay = new Date().toISOString().slice(0, 10);
+    return lots.filter((l) => {
+      if (kho !== "ALL") {
+        if (kho === "chua_ro" ? l.dieuKienLuu : l.dieuKienLuu !== kho) return false;
+      }
+      if (loai !== "ALL" && loaiTheoMa[l.maChung] !== loai) return false;
+      if (maChung !== "ALL" && l.maChung !== maChung) return false;
+      if (tuNgay && (!l.ngaySanXuat || l.ngaySanXuat < tuNgay)) return false;
+      if (denNgay && (!l.ngaySanXuat || l.ngaySanXuat > denNgay)) return false;
+      if (trangThai === "con" && !((l.soOng ?? 0) > 0 && !l.daHuy)) return false;
+      if (trangThai === "het" && (l.soOng ?? 0) > 0) return false;
+      if (trangThai === "qua_han" && !(l.hanSuDung && l.hanSuDung < homNay)) return false;
+      if (trangThai === "da_huy" && !l.daHuy) return false;
+      if (!needle) return true;
+      // Tìm cả trong ghi chú: có lô mà 2 sổ ghi số khác nhau (vd 010121 / 010122),
+      // người tra cứu gõ số nào cũng phải ra.
+      return `${l.soLo} ${l.maChung} ${l.tenChung || ""} ${l.nguonGoc || ""} ${l.viTri || ""} ${l.ghiChu || ""}`
+        .toLowerCase().includes(needle);
+    });
+  }, [lots, q, kho, loai, maChung, tuNgay, denNgay, trangThai, loaiTheoMa]);
+
+  if (loading) {
+    return <div className="flex items-center justify-center gap-2 text-slate-400 text-sm py-16">
+      <Loader2 className="w-4 h-4 animate-spin" /> Đang tải sổ chủng giống…
+    </div>;
+  }
+  if (error) {
+    return <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 text-sm text-rose-700">
+      Không tải được: {error}
+      <div className="text-xs text-rose-600 mt-1">
+        Kiểm tra đã chạy <code className="bg-white px-1 rounded">migration_lenmen_giong.sql</code> và{" "}
+        <code className="bg-white px-1 rounded">migration_lenmen_giong_kho.sql</code> chưa.
+      </div>
+    </div>;
+  }
+
+  const tabCls = (on) =>
+    `flex items-center gap-1.5 px-3 py-1.5 text-[13px] rounded-md transition ${on ? "bg-slate-800 text-white" : "text-slate-500 hover:bg-slate-100"}`;
+
+  return (
+    <>
+      <div className="flex gap-1 mb-3">
+        <button className={tabCls(view === "kho")} onClick={() => setView("kho")}>
+          <List className="w-3.5 h-3.5" /> Kho chủng giống
+        </button>
+        <button className={tabCls(view === "baocao")} onClick={() => setView("baocao")}>
+          <BarChart3 className="w-3.5 h-3.5" /> Thống kê / Báo cáo
+        </button>
+      </div>
+
+      {view === "baocao" && <SeedReport lots={lots} allStability={allStability} protocol={protocol} />}
+
+      {view === "kho" && (<>
+      <KhoCards lots={lots} active={kho} setActive={setKho} />
+      <AddLotForm onAdd={addLot} />
+
+      <div className="bg-white rounded-lg border border-slate-200 p-4 mb-3 flex flex-wrap items-end gap-3">
+        <div className="flex-1 min-w-[220px]">
+          <label className="text-xs text-slate-500">Tìm kiếm</label>
+          <div className="relative mt-1">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Số lô, mã chủng, nguồn gốc, vị trí…"
+              className="w-full border border-slate-300 rounded-md pl-8 pr-3 py-2 text-sm" />
+          </div>
+        </div>
+        <div>
+          <label className="text-xs text-slate-500">Kho</label>
+          <select value={kho} onChange={(e) => setKho(e.target.value)} className={`block mt-1 ${inputCls} bg-white`}>
+            <option value="ALL">Tất cả kho</option>
+            {KHO_KEYS.map((k) => <option key={k} value={k}>{DIEU_KIEN_LUU_LABEL[k]}</option>)}
+            <option value="chua_ro">Chưa gán kho</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-slate-500">Loài</label>
+          <select value={loai} onChange={(e) => setLoai(e.target.value)} className={`block mt-1 ${inputCls} bg-white max-w-[200px]`}>
+            <option value="ALL">Tất cả loài</option>
+            {dsLoai.map((x) => <option key={x} value={x}>{x}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-slate-500">Mã chủng</label>
+          <select value={maChung} onChange={(e) => setMaChung(e.target.value)} className={`block mt-1 ${inputCls} bg-white font-mono`}>
+            <option value="ALL">Tất cả mã</option>
+            {dsMaChung.map((x) => <option key={x} value={x}>{x}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-slate-500">NSX từ</label>
+          <input type="date" value={tuNgay} onChange={(e) => setTuNgay(e.target.value)} className={`block mt-1 ${inputCls}`} />
+        </div>
+        <div>
+          <label className="text-xs text-slate-500">đến</label>
+          <input type="date" value={denNgay} onChange={(e) => setDenNgay(e.target.value)} className={`block mt-1 ${inputCls}`} />
+        </div>
+        <div>
+          <label className="text-xs text-slate-500">Trạng thái</label>
+          <select value={trangThai} onChange={(e) => setTrangThai(e.target.value)} className={`block mt-1 ${inputCls} bg-white`}>
+            <option value="ALL">Tất cả</option>
+            <option value="con">Còn ống</option>
+            <option value="het">Hết ống</option>
+            <option value="qua_han">Quá hạn</option>
+            <option value="da_huy">Đã huỷ</option>
+          </select>
+        </div>
+        {coLoc && (
+          <button onClick={xoaLoc} className="text-xs text-slate-500 hover:text-slate-700 underline pb-2">Xoá lọc</button>
+        )}
+        <div className="w-full text-[11px] text-slate-400">
+          Đang hiện <b className="text-slate-600">{filtered.length}</b>/{lots.length} lô
+          {" · "}<b className="text-slate-600">{filtered.reduce((s2, l) => s2 + (Number(l.soOng) || 0), 0)}</b> ống
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">
+          Không có lô nào khớp bộ lọc.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((lot) => {
+            const isOpen = expanded === lot.id;
+            const months = monthsSince(lot.ngaySanXuat);
+            const hetHan = lot.hanSuDung && new Date(lot.hanSuDung) < new Date();
+            return (
+              <div key={lot.id} className={`bg-white rounded-lg border overflow-hidden ${lot.daHuy ? "border-slate-200 opacity-70" : "border-slate-200"}`}>
+                <div className="px-4 py-3 flex items-center gap-3 flex-wrap">
+                  <button onClick={() => toggle(lot)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
+                    {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
+                    <span className="font-mono text-sm font-medium">{lot.soLo}</span>
+                    <span className="font-mono text-xs text-slate-500"
+                      title={(() => { const g = giaiMaChung(lot.maChung); return g ? `${g.tienMa} · ${g.loai} · ${g.nhaCungCap} · ${g.dangLuu}` : ""; })()}>
+                      {lot.maChung}
+                    </span>
+                    <span className="text-xs text-slate-600 flex-1 truncate">
+                      {lot.tenChung || loaiTheoMa[lot.maChung] || "–"}
+                    </span>
+                  </button>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 whitespace-nowrap">
+                    {DIEU_KIEN_LUU_LABEL[lot.dieuKienLuu] || "Chưa gán kho"}
+                  </span>
+                  <span className={`text-xs font-medium whitespace-nowrap ${(lot.soOng ?? 0) === 0 ? "text-slate-300" : "text-slate-800"}`}>
+                    {lot.soOng ?? 0} ống
+                  </span>
+                  {hetHan && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 whitespace-nowrap">Quá hạn</span>
+                  )}
+                  <span className="text-[11px] text-slate-400 whitespace-nowrap">
+                    NSX {fmtDate(lot.ngaySanXuat)}{months != null ? ` · ${months} tháng` : ""}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {lot.daHuy ? (
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 whitespace-nowrap"
+                        title={[lot.lyDoHuy, lot.ngayHuy ? "ngày " + fmtDate(lot.ngayHuy) : ""].filter(Boolean).join(" — ")}>
+                        Đã huỷ
+                      </span>
+                    ) : (<>
+                    <button onClick={() => setMoveCtx({ lot, loai: "nhap" })} title="Nhập kho"
+                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 hover:bg-slate-50">
+                      <ArrowDownToLine className="w-3.5 h-3.5" /> Nhập
+                    </button>
+                    <button onClick={() => setMoveCtx({ lot, loai: "xuat" })} title="Xuất kho"
+                      disabled={(lot.soOng ?? 0) === 0}
+                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                      <ArrowUpFromLine className="w-3.5 h-3.5" /> Xuất
+                    </button>
+                    <button onClick={() => setHuyLotCtx(lot)} title="Huỷ lô"
+                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 text-rose-600 hover:bg-rose-50 hover:border-rose-300">
+                      <Trash2 className="w-3.5 h-3.5" /> Huỷ
+                    </button>
+                    </>)}
+                    <button onClick={() => setLabelLot(lot)} title="Tạo nhãn ống và nhãn hộp"
+                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 hover:bg-slate-50">
+                      <Tag className="w-3.5 h-3.5" /> Nhãn
+                    </button>
+                  </div>
+                </div>
+
+                {isOpen && (
+                  <>
+                    <div className="px-4 pb-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                      <div><div className="text-slate-500">Khay</div><div className="font-medium">{strains.find((x) => x.maChung === lot.maChung)?.khay || "–"}</div></div>
+                      <div><div className="text-slate-500">Đơn vị tính</div><div className="font-medium">{lot.donViTinh || "–"}</div></div>
+                      <div className="col-span-2"><div className="text-slate-500">Thông tin chủng</div><div className="font-medium">{lot.thongTin || strains.find((x) => x.maChung === lot.maChung)?.thongTin || "–"}</div></div>
+                      <div><div className="text-slate-500">Vị trí trong kho</div><div className="font-medium">{lot.viTri || "–"}</div></div>
+                      <div><div className="text-slate-500">Hạn dùng</div><div className="font-medium">{fmtDate(lot.hanSuDung)}</div></div>
+                      <div><div className="text-slate-500">Nguồn gốc</div><div className="font-medium">{lot.nguonGoc || "–"}</div></div>
+                      <div><div className="text-slate-500">Mật độ (10⁹ CFU/ml)</div><div className="font-medium">{lot.matDo ?? "–"}</div></div>
+                      <div><div className="text-slate-500">Nhiễm khuẩn</div><div className="font-medium">{lot.nhiemKhuan || "–"}</div></div>
+                      <div><div className="text-slate-500">Độ đồng đều</div><div className="font-medium">{lot.doDongDeu || "–"}</div></div>
+                      <div><div className="text-slate-500">Khả năng tạo bào tử</div><div className="font-medium">{lot.khaNangTaoBaoTu || "–"}</div></div>
+                      <div><div className="text-slate-500">Người làm</div><div className="font-medium">{lot.nguoiLam || "–"}</div></div>
+                      {lot.tinhTrangSx && (
+                        <div className="col-span-2 sm:col-span-4"><div className="text-slate-500">Tình trạng SX</div><div className="font-medium">{lot.tinhTrangSx}</div></div>
+                      )}
+                      {lot.daHuy && (
+                        <div className="col-span-2 sm:col-span-4 bg-rose-50 border border-rose-200 rounded-md p-2">
+                          <div className="text-rose-700 font-medium">Đã huỷ ngày {fmtDate(lot.ngayHuy)}</div>
+                          <div className="text-rose-600">{lot.lyDoHuy || "Không ghi lý do"}</div>
+                        </div>
+                      )}
+                      {lot.ghiChu && (
+                        <div className="col-span-2 sm:col-span-4"><div className="text-slate-500">Ghi chú</div><div className="text-slate-600">{lot.ghiChu}</div></div>
+                      )}
+                    </div>
+
+                    <div className="border-t border-slate-200 p-4">
+                      <div className="font-semibold text-sm mb-2">Nhật ký xuất / nhập</div>
+                      <MovementLog moves={movements[lot.id] || []} />
+                    </div>
+
+                    <StabilityMatrix lot={lot} points={stability[lot.id] || []} protocol={protocol} onSave={savePoint} />
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      </>)}
+
+      {labelLot && <SeedLabelModal lot={labelLot} onClose={() => setLabelLot(null)} />}
+      {huyLotCtx && (
+        <HuyModal lot={huyLotCtx} onClose={() => setHuyLotCtx(null)}
+          onDone={(updated) => afterMove(updated)} />
+      )}
+      {moveCtx && (
+        <MovementModal lot={moveCtx.lot} loai={moveCtx.loai}
+          onClose={() => setMoveCtx(null)} onDone={afterMove} />
+      )}
+    </>
+  );
+}

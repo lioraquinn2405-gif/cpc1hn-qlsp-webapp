@@ -7,3 +7,14 @@ dist
 *.log
 *.xlsx
 scripts/_shot-debug-*.png
+
+# Dữ liệu thật xuất từ SQLite của hệ cũ khi gộp "Cảnh báo lên men" — chỉ dùng tại máy
+lenmen-export.json
+
+# Script tạm nối thẳng Postgres khi gộp dữ liệu (đọc chuỗi kết nối ngoài repo)
+_pg*.mjs
+
+# REPO NÀY CÔNG KHAI. Dữ liệu sản xuất thật (mã chủng, số lô, mật độ, kết quả QC)
+# tuyệt đối không đưa lên — chỉ dùng tại máy khi nhập liệu một lần.
+scripts/_seed-lots-data.json
+scripts/_seed-dod-data.json

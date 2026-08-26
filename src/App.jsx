@@ -2,9 +2,12 @@ import React, { useState, useMemo, useCallback, useEffect, useRef, useLayoutEffe
 import {
   PackageOpen, AlertTriangle, CheckCircle2, Beaker, Boxes, Users, FlaskConical,
   Plus, Trash2, ChevronRight, ChevronDown, ChevronUp, Droplets, Loader2, Ban, LogOut, X, RotateCcw,
-  Calculator, XCircle, HelpCircle, Settings, Mail, KeyRound, GripVertical, Factory, Sparkles, TrendingUp, Menu,
+  Calculator, XCircle, HelpCircle, Settings, Mail, KeyRound, GripVertical, Factory, Sparkles, Menu,
   Search,
+  ShieldAlert, Snowflake,
 } from "lucide-react";
+import LenMenPanel from "./LenMenPanel.jsx";
+import SeedLotPanel from "./SeedLotPanel.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabaseClient.js";
 import {
   fetchMaterials, fetchProducts, updateMaterialField, updateMaterialFields, removeMaterial,
@@ -12,10 +15,10 @@ import {
   removeProduct, subscribeMaterials, reorderProducts,
 } from "./lib/materialsApi.js";
 import { fetchProfile, fetchProfiles, updateProfile, setUserEmail, requestEmailChange, signUp, adminCreateUser } from "./lib/profilesApi.js";
+import { parseDotSanXuat, parseSoLoDate, productionDate } from "./lib/materialsQc.js";
 import { planSingleComponent, planTwoComponent, TANK_MAX_L, MAX_LOTS_PER_BATCH, MAX_CLOSING_OVERSHOOT } from "./lib/mixPlanner.js";
 import { fetchMixPlans, fetchMixPlansByIds, saveMixPlanDecision, saveEditedMixPlanDecision, removeMixPlan, reviewMixPlanWithAi } from "./lib/mixPlansApi.js";
 import { fetchFinishedBatches, createFinishedBatch, updateFinishedBatchField } from "./lib/finishedBatchesApi.js";
-import { fetchNLTrendReports, saveNLTrendReport, requestNLTrendAI, OVERVIEW_REPORT_MONTH } from "./lib/nlTrendReportsApi.js";
 
 // "Chờ SX" KHÔNG nằm trong danh sách này nữa (2026-07-30, NCV yêu cầu) — chuyển sang nằm trong mục
 // "Pha chế" (cạnh "Pha chế NCV"/"Pha chế SX") vì về bản chất là 1 bước của quy trình pha chế, không
@@ -34,6 +37,14 @@ const STATUS_LABEL = {
 const STRAIN_OPTIONS = [
   { value: "subtilis", label: "Bacillus subtilis" },
   { value: "clausii", label: "Bacillus clausii" },
+];
+
+// Các mục con của "Cảnh báo lên men" (xem LenMenPanel.jsx). Khoá đều mang tiền tố
+// lenmen- để phân biệt rõ với các tab của phần pha chế.
+const LENMEN_TABS = [
+  { key: "lenmen-batches", label: "Danh sách lô" },
+  { key: "lenmen-khsx", label: "Kế hoạch sản xuất" },
+  { key: "lenmen-overview", label: "Tổng quan" },
 ];
 
 const POOL_LABEL = {
@@ -84,41 +95,9 @@ const DIACRITICS_RE = new RegExp(String.fromCharCode(91, 92, 117, 48, 51, 48, 48
 const norm = (s) => String(s || "").toLowerCase().normalize("NFD").replace(DIACRITICS_RE, "").replace(/đ/g, "d").trim();
 
 /* ---------- Phân luồng tự động ---------- */
-function parseDotSanXuat(s) {
-  const str = String(s || "").trim();
-  let m = str.match(/^(\d{1,2})\/(\d{2,4})$/); // M/YY hoặc M/YYYY
-  if (m) {
-    const month = parseInt(m[1], 10);
-    let year = parseInt(m[2], 10);
-    if (year < 100) year += 2000;
-    return month >= 1 && month <= 12 ? new Date(year, month - 1, 1) : null;
-  }
-  m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); // D/M/YY hoặc D/M/YYYY
-  if (m) {
-    const month = parseInt(m[2], 10);
-    let year = parseInt(m[3], 10);
-    if (year < 100) year += 2000;
-    return month >= 1 && month <= 12 ? new Date(year, month - 1, 1) : null;
-  }
-  return null;
-}
-function parseSoLoDate(soLo) {
-  const s = String(soLo || "").trim();
-  // Dạng phổ biến: ddMMyy... ở đầu số lô (vd "010126SF1.C1" = 01/01/26)
-  let m = s.match(/^(\d{2})(\d{2})(\d{2})/);
-  if (m) {
-    const month = parseInt(m[2], 10), year = 2000 + parseInt(m[3], 10);
-    if (month >= 1 && month <= 12) return new Date(year, month - 1, 1);
-  }
-  // Dạng mới từ 2026: yy + chữ cái tháng (A=1/2026 ... L=12) + số thứ tự (vd "26F01SA1" = 6/2026)
-  m = s.match(/^(\d{2})([A-La-l])\d/);
-  if (m) {
-    const year = 2000 + parseInt(m[1], 10);
-    const month = m[2].toUpperCase().charCodeAt(0) - 64;
-    return new Date(year, month - 1, 1);
-  }
-  return null;
-}
+// parseDotSanXuat/parseSoLoDate/productionDate chuyển sang lib/materialsQc.js (dùng chung
+// với NLTrendPanel.jsx) — import ở đầu file.
+
 // parseSoLoDate cố tình bỏ qua 2 số đầu (ngày/số thứ tự trong tháng), chỉ lấy
 // tháng/năm cho tính hạn dùng theo tháng. Hàm này lấy CẢ 2 số đó để so sánh
 // lô nào sản xuất trước/sau CÙNG trong 1 tháng (dùng để sắp xếp tab Chờ xử lý,
@@ -138,12 +117,6 @@ function parseSoLoOrderKey(soLo) {
     return year * 10000 + month * 100 + seq;
   }
   return null;
-}
-// Số lô luôn mã hoá ngày sản xuất ở đầu và không bao giờ trống, đáng tin hơn cột
-// "Đợt SX" nhập tay (hay để trống hoặc ghi nhiều định dạng khác nhau) — ưu tiên đọc
-// ngày từ số lô, chỉ dùng "Đợt SX" khi không tách được từ số lô.
-function productionDate(rec) {
-  return parseSoLoDate(rec.soLo) || parseDotSanXuat(rec.dotSanXuat);
 }
 const EXPIRY_MONTHS = 13;
 function monthsSince(rec) {
@@ -230,64 +203,9 @@ const statusOf = (rec) => {
   return classify(rec);
 };
 
-/** Kết quả QC 1 lô cho mục đích phân tích xu hướng nhiễm khuẩn (tab "Xu hướng NL") — mirror ĐÚNG
- * logic isFail/isPassSub/isPass trong classify() ở trên (không tự bịa quy tắc khác), chỉ khác là trả
- * về nhãn kết quả thay vì tính status/loai đầy đủ. null = chưa có kết quả QC (bỏ qua khi thống kê).
- * "fail" = nhiễm khuẩn thật (sẽ đi Chờ xử lý/Đã huỷ) — đúng đối tượng NCV muốn phân tích. "pass_sub"
- * = nhiễm chéo subtilis (chỉ clausii, tự Loại 2, KHÔNG phải chờ xử lý) — vẫn là 1 dạng nhiễm đáng
- * theo dõi riêng nhưng KHÔNG tính vào "fail" vì không bị huỷ/chờ xử lý. */
-function nkOutcome(rec) {
-  const nk = norm(rec.nhiemKhuan);
-  if (!nk) return null;
-  const isFail = nk.includes("khong");
-  const legacySubPattern = isFail && /sub/.test(norm(rec.nhiemConNao));
-  const isPassSub = rec.strain === "clausii" && ((!isFail && nk.includes("dat") && nk.includes("sub")) || legacySubPattern);
-  if (isFail && !isPassSub) return "fail";
-  if (isPassSub) return "pass_sub";
-  return "pass";
-}
-
-/** Gộp thống kê nhiễm khuẩn theo THÁNG SẢN XUẤT (productionDate — suy từ số lô, luôn có sẵn và
- * không đổi theo thời gian, khác "updatedAt" trước đây hay bị rỗng/trễ với dữ liệu cũ) — cho phép
- * trải dài đúng nhiều năm dữ liệu thật (kể cả lô từ 2023/2024), không chỉ năm hiện tại. Mỗi tháng
- * theo dõi CẢ 2 việc: (a) tiến độ nhập KQKN (đã nhập/còn tồn đọng — qcDone/qcPending trên tổng sản
- * lượng thật totalProduced), (b) trong số đã có KQ, tỉ lệ không đạt/nhiễm chéo/đạt. Trả về Map
- * "YYYY-MM" -> stats, sắp XƯA -> MỚI. */
-function computeNLTrendStats(materials) {
-  const byMonth = new Map();
-  for (const m of materials) {
-    if (m.pendingDelete) continue; // đã xoá mềm (Thùng rác) — không tính vào sản lượng thật
-    const pd = productionDate(m);
-    if (!pd) continue;
-    const mk = `${pd.getFullYear()}-${String(pd.getMonth() + 1).padStart(2, "0")}`;
-    if (!byMonth.has(mk)) {
-      byMonth.set(mk, {
-        totalProduced: 0, qcDone: 0, qcPending: 0, fail: 0, passSub: 0, pass: 0,
-        byStrain: { subtilis: { total: 0, fail: 0 }, clausii: { total: 0, fail: 0 } },
-        byReason: {},
-      });
-    }
-    const acc = byMonth.get(mk);
-    acc.totalProduced++;
-    const outcome = nkOutcome(m);
-    if (outcome == null) { acc.qcPending++; continue; }
-    acc.qcDone++;
-    acc[outcome === "fail" ? "fail" : outcome === "pass_sub" ? "passSub" : "pass"]++;
-    const strainKey = m.strain === "clausii" ? "clausii" : "subtilis";
-    acc.byStrain[strainKey].total++;
-    if (outcome === "fail") {
-      acc.byStrain[strainKey].fail++;
-      const reason = m.nhiemConNao || "Không rõ";
-      acc.byReason[reason] = (acc.byReason[reason] || 0) + 1;
-    }
-  }
-  return new Map([...byMonth.entries()].sort(([a], [b]) => a.localeCompare(b)));
-}
-
-function monthLabelVN(mk) {
-  const [y, m] = mk.split("-");
-  return `Tháng ${parseInt(m, 10)}/${y}`;
-}
+// nkOutcome()/computeNLTrendStats()/monthLabelVN() chuyển sang lib/materialsQc.js — dùng
+// chung cho "Xu hướng NL" (NLTrendPanel.jsx) và "Đối chiếu NL" (LenMenOverview.jsx), tránh
+// mỗi nơi tự mirror lại luật kết luận QC.
 
 /* ---------- Công thức pha ----------
  *  V_pha(L) = MĐ_SH(×10¹⁰) × V_dịch(L) × 10¹⁰ / hàm_lượng(cfu/ml)
@@ -873,7 +791,8 @@ function Connected({ session, profile }) {
               {tab === "ke-hoach" && <MixPlanPanel materials={materials} products={products} actorId={actorId} setNote={setNote} reload={reload} canEdit={canEditProduction} canPreview={canPreviewPlan} role={profile.role} userLabel={profile?.fullName || identityLabel(session.user)} />}
               {tab === "sp" && <ProductPanel products={products} setProducts={setProducts} setNote={setNote} isAdmin={isAdmin} canEdit={canEditProduction} />}
               {tab === "sp-history" && <ProductionHistoryPanel products={products} setNote={setNote} focusMaSP={spFocus?.maSP} focusTs={spFocus?.ts} canEdit={canEditProduction} />}
-              {tab === "xu-huong-nl" && <NLTrendPanel materials={materials} actorId={actorId} setNote={setNote} />}
+              {LENMEN_TABS.some((t) => t.key === tab) && <LenMenPanel tab={tab} materials={materials} actorId={actorId} setNote={setNote} />}
+              {tab === "giong" && <SeedLotPanel />}
               {tab === "users" && isAdmin && <UsersPanel profiles={profiles} onUpdate={updateUserProfile} currentUserId={actorId} onCreated={reload} />}
               {tab === "account" && <AccountSettingsPanel session={session} profile={profile} />}
             </>
@@ -890,10 +809,12 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strain
   const [nlOpen, setNlOpen] = useState(true);
   const [phaOpen, setPhaOpen] = useState(true);
   const [spOpen, setSpOpen] = useState(true);
+  const [lenMenOpen, setLenMenOpen] = useState(true);
   const [manualOpen, setManualOpen] = useState({});
   const isPhaTab = tab === "pha" || tab === "ke-hoach" || tab === "cho-sx";
-  const isNlTab = NL_TABS.some((t) => t.key === tab) || tab === "cho-xoa" || tab === "xu-huong-nl";
+  const isNlTab = NL_TABS.some((t) => t.key === tab) || tab === "cho-xoa";
   const isSpTab = tab === "sp" || tab === "sp-history";
+  const isLenMenTab = LENMEN_TABS.some((t) => t.key === tab);
   const SIDEBAR_BG = "#28374a";
   const ACTIVE_TEXT = "#28374a";
   const isStatusOpen = (key) => (manualOpen[key] !== undefined ? manualOpen[key] : tab === key);
@@ -1010,12 +931,6 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strain
                 </div>
               );
             })}
-            <button onClick={() => setTab("xu-huong-nl")}
-              className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === "xu-huong-nl" ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
-              style={tab === "xu-huong-nl" ? { color: ACTIVE_TEXT } : undefined}>
-              <TrendingUp className="w-3.5 h-3.5 shrink-0" />
-              <span className="flex-1 text-left">Xu hướng NL</span>
-            </button>
           </div>
         )}
 
@@ -1039,6 +954,28 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strain
             </button>
           </div>
         )}
+        {/* Cảnh báo lên men — công đoạn TRƯỚC nguyên liệu (thu bào tử), gộp từ app chạy riêng
+            trước đây. Đặt dưới "Sản phẩm" theo đúng thứ tự quy trình. */}
+        <button onClick={() => setLenMenOpen((o) => !o)}
+          className={`w-full flex items-center gap-2 px-4 py-2.5 hover:bg-white/10 transition ${isLenMenTab ? "bg-white/10 font-medium" : ""}`}>
+          <ShieldAlert className="w-4 h-4 shrink-0" />
+          <span className="flex-1 text-left">Cảnh báo lên men</span>
+          {lenMenOpen ? <ChevronDown className="w-3.5 h-3.5 text-amber-400" /> : <ChevronRight className="w-3.5 h-3.5 text-amber-400" />}
+        </button>
+        {lenMenOpen && (
+          <div className="mx-2 my-1 py-1 rounded-md bg-black/15">
+            {LENMEN_TABS.map((t) => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === t.key ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
+                style={tab === t.key ? { color: ACTIVE_TEXT } : undefined}>
+                <span className="flex-1 text-left">{t.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {/* Bảo quản chủng giống — sổ lô ống chủng + theo dõi độ ổn định, thay file Excel
+            "File tổng SỐ LÔ". Là menu riêng, không nằm trong Cảnh báo lên men. */}
+        <SidebarLink active={tab === "giong"} icon={Snowflake} activeText={ACTIVE_TEXT} onClick={() => setTab("giong")}>Bảo quản chủng giống</SidebarLink>
         {isAdmin && <SidebarLink active={tab === "users"} icon={Users} activeText={ACTIVE_TEXT} onClick={() => setTab("users")}>Người dùng</SidebarLink>}
       </nav>
       <div className="border-t border-white/10 px-4 py-3 flex items-center gap-2">
@@ -1075,7 +1012,6 @@ function Breadcrumb({ tab, focusMaSP, products }) {
   const focusedProduct = focusMaSP && (products || []).find((p) => p.maSP === focusMaSP);
   const parts = nlTab ? ["Trang chủ", "Quản lý NL", nlTab.label]
     : tab === "cho-xoa" ? ["Trang chủ", "Quản lý NL", "Chờ pha", "Thùng rác"]
-    : tab === "xu-huong-nl" ? ["Trang chủ", "Quản lý NL", "Xu hướng NL"]
     : tab === "pha" ? ["Trang chủ", "Pha chế NCV"]
     : tab === "ke-hoach" ? ["Trang chủ", "Pha chế SX"]
     : tab === "cho-sx" ? ["Trang chủ", "Pha chế", "Chờ SX"]
@@ -1083,6 +1019,9 @@ function Breadcrumb({ tab, focusMaSP, products }) {
     : tab === "sp-history" ? (focusedProduct
         ? ["Trang chủ", "Sản phẩm", "Lịch sử pha chế", `${focusedProduct.maSP} · ${focusedProduct.tenSP}`]
         : ["Trang chủ", "Sản phẩm", "Lịch sử pha chế"])
+    : LENMEN_TABS.some((t) => t.key === tab)
+        ? ["Trang chủ", "Cảnh báo lên men", LENMEN_TABS.find((t) => t.key === tab).label]
+    : tab === "giong" ? ["Trang chủ", "Bảo quản chủng giống"]
     : tab === "users" ? ["Trang chủ", "Người dùng"]
     : tab === "account" ? ["Trang chủ", "Tài khoản của tôi"]
     : ["Trang chủ", "Sản phẩm"];
@@ -4480,274 +4419,5 @@ function AccountSettingsPanel({ session, profile }) {
   );
 }
 
-/* ---------------- Xu hướng NL (phân tích xu hướng nhiễm khuẩn) ---------------- */
-function NLTrendStat({ label, value, sub, tone = "slate" }) {
-  const toneCls = { slate: "text-slate-800", rose: "text-rose-600", emerald: "text-emerald-600", amber: "text-amber-600" }[tone];
-  return (
-    <div className="bg-white rounded-lg border border-slate-200 p-3">
-      <div className="text-[11px] text-slate-400">{label}</div>
-      <div className={`text-xl font-semibold mt-0.5 ${toneCls}`}>{value}</div>
-      {sub && <div className="text-[11px] text-slate-400 mt-0.5">{sub}</div>}
-    </div>
-  );
-}
-
-/** Line chart 1 chuỗi (đơn), tỉ lệ % không đạt theo tháng — SVG tay, không dùng thư viện ngoài. Mảnh
- * (2px), đầu mút bo tròn, có hover crosshair+tooltip, gridline mờ, không cần legend vì tiêu đề đã
- * nêu tên chuỗi (đúng nguyên tắc "1 chuỗi thì không cần hộp legend"). */
-function NLTrendLineChart({ points }) {
-  const [hover, setHover] = useState(null);
-  const W = 640, H = 200, padL = 36, padR = 12, padT = 12, padB = 28;
-  const innerW = W - padL - padR, innerH = H - padT - padB;
-  if (points.length === 0) return <div className="text-xs text-slate-400 text-center py-10">Chưa đủ dữ liệu để vẽ xu hướng.</div>;
-  const maxY = Math.max(10, ...points.map((p) => p.pct)) * 1.15;
-  const x = (i) => padL + (points.length === 1 ? innerW / 2 : (i / (points.length - 1)) * innerW);
-  const y = (v) => padT + innerH - (v / maxY) * innerH;
-  const path = points.map((p, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(p.pct).toFixed(1)}`).join(" ");
-  const ticksY = [0, 0.25, 0.5, 0.75, 1].map((f) => f * maxY);
-
-  return (
-    <div className="relative">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto" style={{ maxHeight: 220 }}>
-        {ticksY.map((t, i) => (
-          <g key={i}>
-            <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} stroke="#e1e0d9" strokeWidth={1} />
-            <text x={padL - 6} y={y(t)} textAnchor="end" dominantBaseline="middle" fontSize={10} fill="#898781">{fmt(t, 0)}%</text>
-          </g>
-        ))}
-        <path d={path} fill="none" stroke="#e11d48" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
-        {points.map((p, i) => (
-          <circle key={i} cx={x(i)} cy={y(p.pct)} r={hover === i ? 5 : 3.5} fill="#e11d48"
-            className="cursor-pointer transition-all"
-            onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)} />
-        ))}
-        {points.map((p, i) => (
-          (points.length <= 8 || i % Math.ceil(points.length / 8) === 0) && (
-            <text key={`lbl-${i}`} x={x(i)} y={H - 8} textAnchor="middle" fontSize={10} fill="#898781">{p.label.replace("Tháng ", "T")}</text>
-          )
-        ))}
-      </svg>
-      {hover != null && (
-        <div className="absolute bg-slate-800 text-white text-[11px] rounded px-2 py-1 pointer-events-none -translate-x-1/2 -translate-y-full"
-          style={{ left: `${(x(hover) / W) * 100}%`, top: `${(y(points[hover].pct) / H) * 100}%` }}>
-          {points[hover].label}: {fmt(points[hover].pct, 1)}% ({points[hover].fail}/{points[hover].total})
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Bar chart ngang gọn — dùng cho phân tích theo hạng mục (nhiễm con nào / theo chủng). Mảnh, có
- * khoảng cách rõ giữa các thanh, nhãn trực tiếp (không cần bảng chú giải riêng vì mỗi thanh đã tự có
- * nhãn tên ngay cạnh). */
-function NLTrendBarChart({ items, color = "#e11d48" }) {
-  if (!items.length) return <div className="text-xs text-slate-400 text-center py-6">Không có dữ liệu.</div>;
-  const max = Math.max(1, ...items.map((it) => it.value));
-  return (
-    <div className="space-y-2">
-      {items.map((it) => (
-        <div key={it.label} className="flex items-center gap-2 text-xs">
-          <div className="w-36 shrink-0 text-slate-600 truncate" title={it.label}>{it.label}</div>
-          <div className="flex-1 bg-slate-100 rounded-full h-3 overflow-hidden">
-            <div className="h-full rounded-full" style={{ width: `${(it.value / max) * 100}%`, backgroundColor: color, minWidth: it.value > 0 ? "6px" : 0 }} />
-          </div>
-          <div className="w-10 shrink-0 text-right text-slate-500 tabular-nums">{it.value}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/** Tab "Xu hướng NL" (trong Quản lý NL) — phân tích tỉ lệ NL không đạt kiểm nhiễm khuẩn theo tháng,
- * từ đúng dữ liệu materials hiện có (nhóm theo tháng nhập kết quả QC — xem computeNLTrendStats),
- * chia thành các tab tháng riêng + 1 tab "Tổng quan" gộp toàn bộ. Đánh giá AI CHỈ chạy khi NCV chủ
- * động bấm nút (không tự động) — lưu lại theo từng tháng để không phải tạo lại mỗi lần xem. */
-function NLTrendPanel({ materials, actorId, setNote }) {
-  const statsByMonth = useMemo(() => computeNLTrendStats(materials), [materials]);
-  const monthKeys = useMemo(() => [...statsByMonth.keys()].reverse(), [statsByMonth]); // mới nhất trước
-  // Nhóm theo năm để bấm 1 năm mới xổ ra các tháng của năm đó — trước đó liệt kê phẳng hết mọi
-  // tháng từ trước tới nay (2021...2026, kể cả năm lỗi 2036 do lô nhập sai ngày) nhìn rất rối.
-  const monthsByYear = useMemo(() => {
-    const map = new Map();
-    for (const mk of monthKeys) {
-      const y = mk.slice(0, 4);
-      if (!map.has(y)) map.set(y, []);
-      map.get(y).push(mk);
-    }
-    return map;
-  }, [monthKeys]);
-  const years = useMemo(() => [...monthsByYear.keys()], [monthsByYear]); // đã sắp mới nhất trước (theo monthKeys)
-  const [expandedYear, setExpandedYear] = useState(() => monthKeys[0]?.slice(0, 4) ?? null);
-  const [selected, setSelected] = useState("overview");
-  const [reports, setReports] = useState({}); // reportMonth ("YYYY-MM-01") -> row
-  const [loadingReports, setLoadingReports] = useState(true);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
-
-  useEffect(() => {
-    fetchNLTrendReports()
-      .then((rows) => setReports(Object.fromEntries(rows.map((r) => [r.reportMonth, r]))))
-      // Không hiện nguyên văn lỗi Postgres/Supabase (có thể lộ tên bảng/schema thật) — chỉ báo
-      // chung chung, đủ để NCV biết cần báo lại admin kiểm tra migration.
-      .catch(() => setNote("Không tải được đánh giá AI đã lưu trước đó — có thể do chưa chạy đủ migration. Vẫn xem được số liệu, chỉ phần đánh giá đã lưu bị ảnh hưởng."))
-      .finally(() => setLoadingReports(false));
-  }, [setNote]);
-
-  const overviewStats = useMemo(() => {
-    const acc = {
-      totalProduced: 0, qcDone: 0, qcPending: 0, fail: 0, passSub: 0, pass: 0,
-      byStrain: { subtilis: { total: 0, fail: 0 }, clausii: { total: 0, fail: 0 } }, byReason: {},
-    };
-    for (const s of statsByMonth.values()) {
-      acc.totalProduced += s.totalProduced; acc.qcDone += s.qcDone; acc.qcPending += s.qcPending;
-      acc.fail += s.fail; acc.passSub += s.passSub; acc.pass += s.pass;
-      for (const strain of ["subtilis", "clausii"]) {
-        acc.byStrain[strain].total += s.byStrain[strain].total;
-        acc.byStrain[strain].fail += s.byStrain[strain].fail;
-      }
-      for (const [reason, n] of Object.entries(s.byReason)) acc.byReason[reason] = (acc.byReason[reason] || 0) + n;
-    }
-    return acc;
-  }, [statsByMonth]);
-
-  // % không đạt tính trên số ĐÃ CÓ KQ (qcDone) — không tính trên totalProduced, để không bị pha
-  // loãng bởi lô còn tồn đọng chưa QC (đặc biệt tháng gần đây, QC chưa kịp trả hết).
-  const linePoints = useMemo(() => monthKeys.slice().reverse().map((mk) => {
-    const s = statsByMonth.get(mk);
-    return { label: monthLabelVN(mk), pct: s.qcDone ? (s.fail / s.qcDone) * 100 : 0, fail: s.fail, total: s.qcDone };
-  }), [monthKeys, statsByMonth]);
-
-  const isOverview = selected === "overview";
-  const curStats = isOverview ? overviewStats : statsByMonth.get(selected);
-  const curLabel = isOverview ? "Tổng quan (toàn bộ dữ liệu)" : monthLabelVN(selected);
-  // Tổng quan dùng chung đúng 1 cơ chế lưu/hiện với từng tháng, chỉ khác khoá lưu là hằng số
-  // OVERVIEW_REPORT_MONTH (ngày mốc giả) thay vì "YYYY-MM-01" thật — tận dụng lại constraint
-  // unique(report_month) sẵn có, không cần state/nhánh xử lý riêng cho Tổng quan nữa.
-  const reportMonthKey = isOverview ? OVERVIEW_REPORT_MONTH : `${selected}-01`;
-  const savedReport = reports[reportMonthKey];
-
-  const runAi = async () => {
-    if (!curStats) return;
-    setAiLoading(true); setAiError("");
-    try {
-      const explanation = await requestNLTrendAI(curStats, curLabel);
-      const createdAt = new Date().toISOString();
-      setReports((prev) => ({ ...prev, [reportMonthKey]: { reportMonth: reportMonthKey, stats: curStats, aiAssessment: explanation, createdAt } }));
-      // Lưu lại để lần sau khỏi tạo lại — nếu lưu lỗi (vd chưa chạy migration), vẫn giữ nguyên
-      // đánh giá vừa tạo trên màn hình, chỉ báo riêng là chưa lưu được, không lộ lỗi DB gốc.
-      try {
-        await saveNLTrendReport({ reportMonth: reportMonthKey, stats: curStats, aiAssessment: explanation, createdBy: actorId });
-      } catch {
-        setNote("Đã tạo đánh giá nhưng không lưu lại được — có thể do chưa chạy đủ migration. Đánh giá vẫn hiện ở dưới, chỉ là lần sau mở lại sẽ phải tạo lại.");
-      }
-    } catch (err) {
-      setAiError(err.message);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const reasonItems = curStats ? Object.entries(curStats.byReason).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value })) : [];
-  const strainItems = curStats ? [
-    { label: "Subtilis", value: curStats.byStrain.subtilis.fail },
-    { label: "Clausii", value: curStats.byStrain.clausii.fail },
-  ] : [];
-
-  const aiText = savedReport?.aiAssessment;
-
-  return (
-    <div className="space-y-4">
-      <div className="bg-white rounded-lg border border-slate-200 p-2 space-y-1.5">
-        <div className="flex flex-wrap gap-1.5">
-          <button onClick={() => setSelected("overview")}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${isOverview ? "bg-[#28374a] text-white" : "text-slate-500 hover:bg-slate-100"}`}>
-            Tổng quan
-          </button>
-          {years.map((y) => (
-            <button key={y} onClick={() => setExpandedYear(expandedYear === y ? null : y)}
-              className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium transition ${expandedYear === y ? "bg-slate-700 text-white" : "text-slate-500 hover:bg-slate-100"}`}>
-              Năm {y}
-              {expandedYear === y ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            </button>
-          ))}
-          {!loadingReports && monthKeys.length === 0 && (
-            <span className="text-xs text-slate-400 px-2 py-1.5">Chưa có lô NL nào để thống kê.</span>
-          )}
-        </div>
-        {expandedYear && monthsByYear.has(expandedYear) && (
-          <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-slate-100">
-            {monthsByYear.get(expandedYear).map((mk) => (
-              <button key={mk} onClick={() => setSelected(mk)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition ${selected === mk ? "bg-[#28374a] text-white" : "text-slate-500 hover:bg-slate-100"}`}>
-                {monthLabelVN(mk)}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {curStats && (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <NLTrendStat label="Tổng lô sản xuất" value={fmt(curStats.totalProduced, 0)} sub={curLabel} />
-            <NLTrendStat label="Đã nhập KQ QC" value={fmt(curStats.qcDone, 0)}
-              sub={curStats.totalProduced ? `${fmt((curStats.qcDone / curStats.totalProduced) * 100, 1)}% tổng lô` : "–"} />
-            <NLTrendStat label="Chưa nhập KQ QC" value={fmt(curStats.qcPending, 0)} tone="amber"
-              sub={curStats.totalProduced ? `${fmt((curStats.qcPending / curStats.totalProduced) * 100, 1)}% tổng lô` : "–"} />
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <NLTrendStat label="Không đạt (nhiễm)" value={fmt(curStats.fail, 0)} tone="rose"
-              sub={curStats.qcDone ? `${fmt((curStats.fail / curStats.qcDone) * 100, 1)}% số lô đã QC` : "–"} />
-            <NLTrendStat label="Nhiễm chéo subtilis (clausii Loại 2)" value={fmt(curStats.passSub, 0)} tone="amber"
-              sub={curStats.qcDone ? `${fmt((curStats.passSub / curStats.qcDone) * 100, 1)}% số lô đã QC` : "–"} />
-            <NLTrendStat label="Đạt" value={fmt(curStats.pass, 0)} tone="emerald"
-              sub={curStats.qcDone ? `${fmt((curStats.pass / curStats.qcDone) * 100, 1)}% số lô đã QC` : "–"} />
-          </div>
-
-          {isOverview && (
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
-              <h3 className="font-semibold text-sm mb-3">Xu hướng tỉ lệ không đạt theo tháng</h3>
-              <NLTrendLineChart points={linePoints} />
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
-              <h3 className="font-semibold text-sm mb-3">Không đạt theo loại nhiễm (nhiễm con nào)</h3>
-              <NLTrendBarChart items={reasonItems} color="#e11d48" />
-            </div>
-            <div className="bg-white rounded-lg border border-slate-200 p-4">
-              <h3 className="font-semibold text-sm mb-3">Không đạt theo chủng</h3>
-              <NLTrendBarChart items={strainItems} color="#0284c7" />
-            </div>
-          </div>
-
-          <div className="bg-white rounded-lg border border-slate-200 p-4">
-            <div className="flex items-center gap-2">
-              <button disabled={aiLoading} onClick={runAi}
-                className="flex items-center gap-1.5 bg-indigo-600 text-white text-sm px-4 py-2 rounded-md hover:bg-indigo-700 disabled:opacity-50">
-                {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                {aiLoading ? "Đang phân tích..." : aiText ? "Tạo lại đánh giá AI" : "Tạo đánh giá AI"}
-              </button>
-              <span className="text-[11px] text-slate-400">AI phân tích dựa trên đúng số liệu thống kê ở trên, không tự bịa số khác.</span>
-            </div>
-            {aiError && <p className="mt-2 text-xs text-rose-600">Lỗi: {aiError}</p>}
-            {aiText && (
-              <div className="mt-3 bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-slate-700 whitespace-pre-wrap">
-                {aiText}
-                {savedReport?.createdAt && (
-                  <p className="mt-2 text-[11px] text-slate-400">
-                    Lập lúc {new Date(savedReport.createdAt).toLocaleString("vi-VN")}
-                  </p>
-                )}
-              </div>
-            )}
-            {!aiText && !aiLoading && (
-              <p className="mt-2 text-xs text-slate-400">Chưa có đánh giá AI cho {isOverview ? "tổng quan" : curLabel.toLowerCase()} — bấm nút phía trên để tạo.</p>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
+// NLTrendPanel (Xu hướng NL) chuyển sang src/NLTrendPanel.jsx, nhúng làm tab con trong
+// Cảnh báo lên men > Tổng quan (LenMenOverview.jsx) — xem lý do ở đầu file đó.
