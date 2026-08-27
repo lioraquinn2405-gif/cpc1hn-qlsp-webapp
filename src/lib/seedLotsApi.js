@@ -275,6 +275,48 @@ export async function updateMovement(id, patch) {
   if (error) throw error;
 }
 
+/* --------------------------- Đề nghị xuất (QC → admin duyệt) --------------------------- */
+// QC chỉ tạo được đề nghị (bảng riêng, KHÔNG đụng lenmen_seed_movements nên không trừ tồn) —
+// admin duyệt thì mới gọi recordMovement thật rồi xoá đề nghị. RLS trên bảng này tự giới hạn
+// insert cho admin+QC và select theo đúng người tạo/admin, xem
+// migration_lenmen_giong_de_nghi_xuat.sql — không cần kiểm tra quyền lại ở JS.
+
+const REQUEST_FIELDS = [
+  ["id", "id"], ["seedLotId", "seed_lot_id"], ["soOng", "so_ong"], ["ngay", "ngay"],
+  ["mucDichLoai", "muc_dich_loai"], ["loSanXuat", "lo_san_xuat"],
+  ["nguoiThucHien", "nguoi_thuc_hien"], ["ghiChu", "ghi_chu"],
+  ["createdBy", "created_by"], ["createdAt", "created_at"],
+];
+const requestToCamel = toCamel(REQUEST_FIELDS);
+
+export async function fetchExportRequests() {
+  const { data, error } = await supabase
+    .from("lenmen_seed_xuat_requests").select("*").order("created_at", { ascending: false });
+  if (error) throw error;
+  return data.map(requestToCamel);
+}
+
+export async function createExportRequest(req, actorId) {
+  const payload = {
+    seed_lot_id: req.seedLotId,
+    so_ong: Number(req.soOng),
+    ngay: req.ngay || new Date().toISOString().slice(0, 10),
+    muc_dich_loai: req.mucDichLoai || null,
+    lo_san_xuat: req.loSanXuat ? String(req.loSanXuat).trim() : null,
+    nguoi_thuc_hien: req.nguoiThucHien || null,
+    ghi_chu: req.ghiChu || null,
+  };
+  if (actorId) payload.created_by = actorId;
+  const { data, error } = await supabase.from("lenmen_seed_xuat_requests").insert(payload).select().single();
+  if (error) throw error;
+  return requestToCamel(data);
+}
+
+export async function deleteExportRequest(id) {
+  const { error } = await supabase.from("lenmen_seed_xuat_requests").delete().eq("id", id);
+  if (error) throw error;
+}
+
 /** Tồn kho gộp theo từng kho, để hiện thẻ tổng quan đầu trang. */
 export function summarizeByKho(lots) {
   const out = {};
@@ -356,18 +398,19 @@ export function giaiMaChung(maChung) {
 /**
  * Huỷ lô: ghi 1 lượt 'huy' vào nhật ký rồi đánh dấu lô đã huỷ.
  *
- * Huỷ khác xuất — xuất là lấy ra dùng, huỷ là bỏ đi. Vẫn đi qua nhật ký để giữ vết
- * ai huỷ, bao nhiêu ống, vì lý do gì (yêu cầu GMP), chứ không sửa thẳng tồn kho.
+ * Huỷ khác xuất — xuất là lấy ra dùng, huỷ là bỏ đi. LUÔN ghi vào nhật ký (kể cả lô đã hết
+ * ống, so_ong = 0) để giữ vết ai huỷ, lúc nào, vì lý do gì (yêu cầu GMP) — trước đây bỏ qua
+ * lô 0 ống thì xác nhận huỷ xong không hiện gì ở "Nhật ký xuất/nhập" cả, dù lô đã bị đánh
+ * dấu Đã huỷ. DB đã nới constraint cho phép so_ong = 0 riêng với loai='huy' (xem
+ * migration_lenmen_giong_huy_0_ong.sql) — nhap/xuat vẫn bắt buộc > 0 như cũ.
  */
 export async function huyLot(lot, { soOng, ngay, lyDo, nguoiThucHien }, actorId) {
-  const sl = Number(soOng) || 0;
-  if (sl > 0) {
-    // Trigger trong DB tự trừ tồn và chặn huỷ quá số đang có.
-    await recordMovement({
-      seedLotId: lot.id, loai: "huy", ngay, soOng: sl,
-      mucDich: lyDo, nguoiThucHien,
-    }, actorId);
-  }
+  const sl = Math.max(0, Number(soOng) || 0);
+  // Trigger trong DB tự trừ tồn (không đổi gì khi sl = 0) và chặn huỷ quá số đang có.
+  await recordMovement({
+    seedLotId: lot.id, loai: "huy", ngay, soOng: sl,
+    mucDich: lyDo, nguoiThucHien,
+  }, actorId);
   const patch = {
     daHuy: true,
     ngayHuy: ngay || new Date().toISOString().slice(0, 10),

@@ -1,16 +1,17 @@
-// Phiếu xuất/nhập chủng — dựng lại đúng mẫu Word đang dùng
-// ("GMP26Form xuất nhập chủng.docx": logo + quốc hiệu, tiêu đề PHIẾU XUẤT/NHẬP CHỦNG,
-// Tên/Mục đích, bảng STT-Mã chủng-Số lô chủng-NSX-HD-Số lượng, ngày tháng, bảng ký tên
-// Người xuất(nhập)/Người kiểm tra/Người phê duyệt) — in trực tiếp từ app, khỏi mở file Word
-// riêng. Cùng cách in như SeedLabel.jsx: mở cửa sổ mới, ghi HTML tự chứa, gọi window.print()
-// — không đấu CSS với phần còn lại của app, in ra giống nhau mọi máy.
-//
-// Tiện ích thuần (không phải component) — dùng trực tiếp từ MovementModal (in ngay khi đang
-// điền, kể cả chưa lưu) và từ MovementLog (in lại 1 lượt xuất/nhập đã lưu trong lịch sử).
-// Mỗi lượt xuất/nhập trong DB gắn đúng 1 lô (seed_lot_id not null) nên phiếu ở đây luôn là
-// 1 dòng chủng — không hỗ trợ gộp nhiều chủng trong 1 phiếu.
+// In ấn cho "Bảo quản chủng giống" — tiện ích thuần (không phải component), mở cửa sổ mới,
+// ghi HTML tự chứa, gọi window.print(), cùng letterhead CPC1HN cho cả 3 loại tài liệu:
+//   1. Phiếu xuất/nhập chủng — dựng lại đúng mẫu Word đang dùng ("GMP26Form xuất nhập
+//      chủng.docx"), 1 giao dịch/1 tờ. Dùng từ MovementModal (in ngay khi đang điền, kể cả
+//      chưa lưu) và MovementLog (in lại 1 lượt đã lưu).
+//   2. Sổ lịch sử xuất/nhập của 1 lô — gộp TOÀN BỘ movements của lô đó thành 1 bảng, có số
+//      dư chạy, thay cho việc lục nhiều phiếu lẻ.
+//   3. Bảng kiểm kê chủng giống theo tủ — danh sách lô còn hàng trong 1 hay nhiều tủ, có
+//      tổng cộng, để đối chiếu khi đếm ống thật.
+// Cùng cách in như SeedLabel.jsx — không đấu CSS với phần còn lại của app, in ra giống nhau
+// mọi máy. Mỗi lượt xuất/nhập trong DB gắn đúng 1 lô (seed_lot_id not null) nên phiếu ở đây
+// luôn là 1 dòng chủng — không hỗ trợ gộp nhiều chủng trong 1 phiếu.
 import { splitTenChung } from "./SeedLabel.jsx";
-import { MUC_DICH_LABEL } from "./lib/seedLotsApi.js";
+import { MUC_DICH_LABEL, MOVEMENT_LABEL, DIEU_KIEN_LUU_LABEL } from "./lib/seedLotsApi.js";
 
 // Logo CPC1HN lấy thẳng từ file mẫu Word (word/media/image1.png), nhúng base64 để bản in
 // tự chứa hoàn toàn, không phụ thuộc file ngoài.
@@ -27,6 +28,37 @@ const isoToVN = (iso) => {
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleDateString("vi-VN");
 };
+const nowVN = () => new Date().toLocaleString("vi-VN");
+
+// Letterhead dùng chung cho cả 3 loại tài liệu — tách riêng để không lặp lại logo/quốc hiệu
+// 3 lần trong file.
+const LETTERHEAD_CSS = `
+  .header td { vertical-align: top; padding: 0 4pt; font-size: 10pt; }
+  .header .logo { width: 20mm; }
+  .header .logo img { width: 18mm; }
+  .header .bold { font-weight: bold; }
+  .header .right { text-align: center; }
+  .header .underline { border-bottom: 0.5pt solid #000; display:inline-block; }
+  .header .addr { font-size: 9pt; }
+  h1 { text-align:center; font-size: 18pt; margin: 14pt 0 10pt; }
+`;
+function renderLetterheadHTML() {
+  return `<table class="header">
+    <tr>
+      <td class="logo" rowspan="2"><img src="data:image/png;base64,${LOGO_B64}" alt="CPC1HN" /></td>
+      <td class="bold">CÔNG TY CỔ PHẦN DƯỢC PHẨM</td>
+      <td class="bold right">CỘNG HOÀ XÃ HỘI CHỦ NGHĨA VIỆT NAM</td>
+    </tr>
+    <tr>
+      <td class="bold">CPC1 HÀ NỘI</td>
+      <td class="bold right"><span class="underline">Độc lập – Tự do – Hạnh phúc</span></td>
+    </tr>
+    <tr>
+      <td class="addr" colspan="2">Địa chỉ: Cụm CN Hà Bình Phương - Thường Tín – Hà Nội<br/>Điện thoại: 04.33765503 – số máy lẻ 2801</td>
+      <td></td>
+    </tr>
+  </table>`;
+}
 
 // "Tên" trên phiếu là tên loài vi sinh vật (vd "Bacillus clausii"), khác "Mã chủng" (vd
 // "G3") — suy từ tenChung của lô (tách đúng cách splitTenChung dùng ở nhãn); rất nhiều lô để
@@ -52,14 +84,7 @@ export function renderPhieuHTML({ loai, ten, maChung, soLo, nsx, hd, soLuong, mu
   @page { size: A4; margin: 18mm 16mm; }
   body { font-family: Arial, Helvetica, sans-serif; font-size: 13pt; color:#000; margin:0; }
   table { border-collapse: collapse; width:100%; }
-  .header td { vertical-align: top; padding: 0 4pt; font-size: 10pt; }
-  .header .logo { width: 20mm; }
-  .header .logo img { width: 18mm; }
-  .header .bold { font-weight: bold; }
-  .header .right { text-align: center; }
-  .header .underline { border-bottom: 0.5pt solid #000; display:inline-block; }
-  .header .addr { font-size: 9pt; }
-  h1 { text-align:center; font-size: 18pt; margin: 14pt 0 10pt; }
+  ${LETTERHEAD_CSS}
   .field { margin: 4pt 0; }
   .data { margin-top: 8pt; }
   .data th, .data td { border: 0.5pt solid #000; padding: 4pt 6pt; font-size: 13pt; }
@@ -72,21 +97,7 @@ export function renderPhieuHTML({ loai, ten, maChung, soLo, nsx, hd, soLuong, mu
   .sign .space { height: 60pt; }
   @media screen { body { padding:14mm; background:#f8fafc; } }
 </style></head><body>
-  <table class="header">
-    <tr>
-      <td class="logo" rowspan="2"><img src="data:image/png;base64,${LOGO_B64}" alt="CPC1HN" /></td>
-      <td class="bold">CÔNG TY CỔ PHẦN DƯỢC PHẨM</td>
-      <td class="bold right">CỘNG HOÀ XÃ HỘI CHỦ NGHĨA VIỆT NAM</td>
-    </tr>
-    <tr>
-      <td class="bold">CPC1 HÀ NỘI</td>
-      <td class="bold right"><span class="underline">Độc lập – Tự do – Hạnh phúc</span></td>
-    </tr>
-    <tr>
-      <td class="addr" colspan="2">Địa chỉ: Cụm CN Hà Bình Phương - Thường Tín – Hà Nội<br/>Điện thoại: 04.33765503 – số máy lẻ 2801</td>
-      <td></td>
-    </tr>
-  </table>
+  ${renderLetterheadHTML()}
   <h1>${esc(TIEU_DE[loai])}</h1>
   <p class="field">Tên: ${esc(ten)}</p>
   <p class="field">Mục đích ${tuLoai}: ${esc(mucDichText)}</p>
@@ -116,6 +127,145 @@ export function openPhieuPrint(data) {
   const w = window.open("", "_blank");
   if (!w) return false;
   w.document.write(renderPhieuHTML(data));
+  w.document.close();
+  return true;
+}
+
+/* ============================ Sổ lịch sử xuất/nhập (1 lô) ============================ */
+
+/** Dựng HTML sổ lịch sử — gộp TOÀN BỘ movements của 1 lô thành 1 bảng, tính số dư chạy
+ * (Còn lại) thay vì phải lục nhiều phiếu lẻ. Lô tạo mới KHÔNG sinh movement cho số ống ban
+ * đầu (AddLotForm ghi thẳng so_ong/so_ong_ban_dau lên lenmen_seed_lots) nên số dư phải bắt
+ * đầu từ soOngBanDau — dòng cuối phải khớp lot.soOng hiện tại, dùng để tự kiểm tra.
+ * Tách riêng khỏi việc mở cửa sổ (giống renderPhieuHTML) — chỗ gọi cần window.open() TRƯỚC
+ * nếu phải đợi fetch movements (tránh bị chặn popup do mở cửa sổ sau 1 bước async). */
+export function renderSoLoHistoryHTML({ lot, ten, movements }) {
+  const opening = lot.soOngBanDau ?? lot.soOng ?? 0;
+  const sorted = [...(movements || [])].sort((a, b) => {
+    if (a.ngay !== b.ngay) return (a.ngay || "") < (b.ngay || "") ? -1 : 1;
+    return (a.id || 0) - (b.id || 0);
+  });
+  let running = opening;
+  const rowsHtml = sorted.map((m, i) => {
+    running += m.loai === "nhap" ? Number(m.soOng) : -Number(m.soOng);
+    const mucDich = [m.mucDichLoai ? MUC_DICH_LABEL[m.mucDichLoai] : null, m.mucDich || null].filter(Boolean).join(" · ");
+    return `<tr>
+      <td class="c">${i + 1}</td><td class="c">${esc(isoToVN(m.ngay))}</td><td class="c">${esc(MOVEMENT_LABEL[m.loai])}</td>
+      <td class="c">${m.loai === "nhap" ? "+" : "−"}${esc(m.soOng)}</td>
+      <td>${esc(mucDich)}</td><td class="c">${esc(m.loSanXuat)}</td>
+      <td>${esc(m.nguoiThucHien)}</td><td>${esc(m.nguoiKiemTra)}</td><td>${esc(m.nguoiPheDuyet)}</td>
+      <td class="c b">${esc(running)}</td>
+    </tr>`;
+  }).join("");
+
+  return `<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<title>Sổ lô ${esc(lot.soLo)}</title>
+<style>
+  @page { size: A4 landscape; margin: 14mm; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5pt; color:#000; margin:0; }
+  table { border-collapse: collapse; width:100%; }
+  ${LETTERHEAD_CSS}
+  .info { margin: 10pt 0; }
+  .info td { padding: 2pt 10pt 2pt 0; font-size: 10.5pt; }
+  .info b { font-weight: 600; }
+  .data { margin-top: 6pt; }
+  .data th, .data td { border: 0.5pt solid #000; padding: 3pt 5pt; font-size: 9.5pt; }
+  .data th { font-weight:bold; text-align:center; background:#f0f0f0; }
+  .data td.c { text-align:center; }
+  .data td.b { font-weight: 700; }
+  .tong { text-align:right; font-weight:700; margin-top:6pt; }
+  .footer { margin-top: 10pt; font-size: 9pt; color:#555; }
+  @media screen { body { padding:12mm; background:#f8fafc; } }
+</style></head><body>
+  ${renderLetterheadHTML()}
+  <h1>SỔ THEO DÕI XUẤT/NHẬP CHỦNG GIỐNG</h1>
+  <table class="info">
+    <tr><td><b>Mã chủng:</b> ${esc(lot.maChung)}</td><td><b>Tên loài:</b> ${esc(ten)}</td><td><b>Số lô:</b> ${esc(lot.soLo)}</td></tr>
+    <tr><td><b>Kho:</b> ${esc(DIEU_KIEN_LUU_LABEL[lot.dieuKienLuu] || "Chưa gán kho")}</td><td><b>Vị trí:</b> ${esc(lot.viTri) || "–"}</td><td><b>Nguồn gốc:</b> ${esc(lot.nguonGoc) || "–"}</td></tr>
+    <tr><td><b>NSX:</b> ${esc(isoToVN(lot.ngaySanXuat)) || "–"}</td><td><b>HSD:</b> ${esc(isoToVN(lot.hanSuDung)) || "–"}</td><td><b>Số ống ban đầu:</b> ${esc(opening)}</td></tr>
+  </table>
+  <table class="data">
+    <thead><tr>
+      <th>STT</th><th>Ngày</th><th>Loại</th><th>Số ống</th><th>Mục đích</th><th>Lô SX liên quan</th>
+      <th>Người xuất/nhập</th><th>Người kiểm tra</th><th>Người phê duyệt</th><th>Còn lại</th>
+    </tr></thead>
+    <tbody>${rowsHtml || `<tr><td colspan="10" class="c">Chưa có lượt xuất/nhập nào.</td></tr>`}</tbody>
+  </table>
+  <p class="tong">Tồn hiện tại: ${esc(lot.soOng ?? 0)} ống</p>
+  <p class="footer">In lúc: ${esc(nowVN())}</p>
+  <script>window.onload = function(){ window.print(); };<\/script>
+</body></html>`;
+}
+
+/* ============================ Bảng kiểm kê chủng giống ============================ */
+
+/** Dựng + mở cửa sổ in bảng kiểm kê — 1 lần gọi đồng bộ (không có fetch xen giữa, dữ liệu
+ * đã có sẵn trong state lots của SeedLotPanel). `groups`: [{ khoLabel, rows }], rows đã lọc
+ * sẵn (còn hàng thật, chưa huỷ) và sắp xếp — hàm này chỉ render, không tự lọc/sắp. */
+export function printKiemKe({ groups, ngay }) {
+  const w = window.open("", "_blank");
+  if (!w) return false;
+  const multi = groups.length > 1;
+  let tongLo = 0, tongOng = 0;
+
+  const groupsHtml = groups.map((g) => {
+    const soLo = g.rows.length;
+    const soOng = g.rows.reduce((a, r) => a + (Number(r.soOng) || 0), 0);
+    tongLo += soLo; tongOng += soOng;
+    const rowsHtml = g.rows.map((r, i) => `<tr>
+        <td class="c">${i + 1}</td><td>${esc(r.maChung)}</td><td>${esc(r.tenChung)}</td><td>${esc(r.soLo)}</td>
+        <td>${esc(r.viTri) || "–"}</td><td class="c">${esc(isoToVN(r.ngaySanXuat)) || "–"}</td>
+        <td class="c">${esc(isoToVN(r.hanSuDung)) || "–"}</td><td class="c b">${esc(r.soOng)}</td>
+      </tr>`).join("");
+    return `
+      <h2>${esc(g.khoLabel)}</h2>
+      <table class="data">
+        <thead><tr><th>STT</th><th>Mã chủng</th><th>Tên chủng</th><th>Số lô</th><th>Vị trí</th><th>NSX</th><th>HSD</th><th>Số ống còn</th></tr></thead>
+        <tbody>${rowsHtml || `<tr><td colspan="8" class="c">Không có lô nào còn hàng trong tủ này.</td></tr>`}</tbody>
+      </table>
+      <p class="cong">Cộng — ${esc(g.khoLabel)}: ${soLo} lô, ${soOng} ống</p>`;
+  }).join("");
+
+  const d = ngay ? new Date(ngay) : new Date();
+  const ngayStr = `ngày ${d.getDate()} tháng ${d.getMonth() + 1} năm ${d.getFullYear()}`;
+
+  const html = `<!doctype html><html lang="vi"><head><meta charset="utf-8">
+<title>Bảng kiểm kê chủng giống</title>
+<style>
+  @page { size: A4 landscape; margin: 14mm; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5pt; color:#000; margin:0; }
+  table { border-collapse: collapse; width:100%; }
+  ${LETTERHEAD_CSS}
+  h2 { font-size: 12pt; margin: 12pt 0 4pt; }
+  .sub { text-align:center; font-size:10.5pt; color:#333; margin-top:-6pt; }
+  .data th, .data td { border: 0.5pt solid #000; padding: 3pt 5pt; font-size: 9.5pt; }
+  .data th { font-weight:bold; text-align:center; background:#f0f0f0; }
+  .data td.c { text-align:center; }
+  .data td.b { font-weight: 700; }
+  .cong { text-align:right; font-weight:700; margin: 2pt 0 0; }
+  .tongcong { text-align:right; font-weight:700; font-size:12pt; margin-top:10pt; border-top:0.5pt solid #000; padding-top:6pt; }
+  .ngay { text-align:right; font-style:italic; margin: 14pt 0 4pt; }
+  .sign { margin-top: 4pt; text-align:center; }
+  .sign th { font-weight:bold; padding-bottom: 4pt; width:50%; }
+  .sign .name { height: 10pt; font-weight: 500; }
+  .sign .space { height: 60pt; }
+  @media screen { body { padding:12mm; background:#f8fafc; } }
+</style></head><body>
+  ${renderLetterheadHTML()}
+  <h1>BẢNG KIỂM KÊ CHỦNG GIỐNG</h1>
+  <p class="sub">${multi ? "Tất cả kho" : esc(groups[0]?.khoLabel || "")}</p>
+  ${groupsHtml}
+  ${multi ? `<p class="tongcong">TỔNG CỘNG TOÀN KHO: ${tongLo} lô, ${tongOng} ống</p>` : ""}
+  <p class="ngay">Hà Nội, ${ngayStr}</p>
+  <table class="sign">
+    <tr><th>Người kiểm kê</th><th>Người xác nhận</th></tr>
+    <tr><td class="space"></td><td class="space"></td></tr>
+    <tr><td class="name"></td><td class="name"></td></tr>
+  </table>
+  <script>window.onload = function(){ window.print(); };<\/script>
+</body></html>`;
+
+  w.document.write(html);
   w.document.close();
   return true;
 }

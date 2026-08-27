@@ -6,23 +6,35 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Plus, Loader2, ChevronRight, ChevronDown, AlertTriangle, Search,
-  Snowflake, Tag, ArrowUpFromLine, ArrowDownToLine, X, BarChart3, List, Trash2, Printer, Pencil,
+  Snowflake, Tag, ArrowUpFromLine, ArrowDownToLine, X, BarChart3, List, Trash2, Printer, Pencil, BookOpen, ClipboardList, Check,
 } from "lucide-react";
 import { fetchLenmenSettings } from "./lib/lenmenApi.js";
 import {
   fetchSeedLots, insertSeedLot, fetchStability, saveStabilityPoint,
   fetchMovements, fetchMovementPeople, recordMovement, updateMovement, summarizeByKho, fetchAllStability, fetchStrains, giaiMaChung, huyLot,
+  fetchExportRequests, createExportRequest, deleteExportRequest,
   parseProtocol, dueCheckpoints, monthsSince,
   DIEU_KIEN_LUU_LABEL, STABILITY_CRITERIA, MOVEMENT_LABEL, MUC_DICH_XUAT, MUC_DICH_LABEL,
 } from "./lib/seedLotsApi.js";
 import SeedLabelModal from "./SeedLabel.jsx";
-import { openPhieuPrint, renderPhieuHTML, tenLoaiCuaLo, NGUOI_THUC_HIEN_LABEL } from "./SeedIssueForm.jsx";
+import { openPhieuPrint, renderPhieuHTML, renderSoLoHistoryHTML, printKiemKe, tenLoaiCuaLo, NGUOI_THUC_HIEN_LABEL } from "./SeedIssueForm.jsx";
 import SeedReport from "./SeedReport.jsx";
 import SeedStabilityChart from "./SeedStabilityChart.jsx";
 
 const inputCls = "border border-slate-300 rounded-md px-3 py-2 text-sm";
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("vi-VN") : "–");
 const KHO_KEYS = Object.keys(DIEU_KIEN_LUU_LABEL);
+
+// Mỗi lô chia 2 hàng: hàng 1 = định danh (số lô/mã chủng/tên chủng) + thao tác, hàng 2 =
+// thông tin phụ (kho/tồn/quá hạn/NSX) — tách ra cho thoáng thay vì nhồi hết 1 hàng như trước.
+// Cột cố định riêng cho từng hàng, dùng chung giữa hàng dữ liệu và hàng tiêu đề để luôn khớp
+// cột (tránh lệch như hồi còn flex-wrap, mỗi hàng rộng khác nhau tuỳ độ dài chữ).
+const LOT_ROW1_GRID = "grid grid-cols-[28px_20px_92px_84px_minmax(140px,1fr)_auto] gap-x-3 items-center";
+const LOT_ROW2_GRID = "grid grid-cols-[48px_92px_72px_76px_1fr] gap-x-3 items-center";
+
+// Lý do huỷ chọn nhanh — vẫn ghi chuỗi tự do vào DB (không có CHECK constraint như Mục đích
+// xuất), "Khác" mở ô gõ tay để không bị bó buộc.
+const LY_DO_HUY_OPTIONS = ["Quá hạn dùng", "Nhiễm khuẩn", "Hỏng tủ / sự cố bảo quản", "Không đạt độ ổn định", "Khác"];
 
 /* ------------------------------ Tổng quan kho ------------------------------ */
 
@@ -127,11 +139,17 @@ function AddLotForm({ onAdd }) {
 
 /* ----------------------------- Xuất / nhập kho ----------------------------- */
 
-function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTra: [], pheDuyet: [] }, onNewPeople, onClose, onDone }) {
+/** `prefill`/`onApproved` chỉ dùng khi mở modal này để ADMIN DUYỆT 1 đề nghị xuất do QC gửi
+ * (xem nút "Duyệt" ở tab Đề nghị xuất) — điền sẵn dữ liệu QC đã nhập, admin sửa lại thoải
+ * mái nếu cần, bắt buộc điền thêm Người kiểm tra/Người phê duyệt như xuất bình thường; lưu
+ * xong (`onApproved`) mới xoá dòng đề nghị gốc — không sửa gì khác trong luồng Xuất/Nhập
+ * trực tiếp (prefill/onApproved đều undefined) so với trước. */
+function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTra: [], pheDuyet: [] }, onNewPeople, prefill, onApproved, onClose, onDone }) {
   const [form, setForm] = useState({
     soOng: "", ngay: new Date().toISOString().slice(0, 10), mucDich: "", nguoiThucHien: "", ghiChu: "",
     nguoiKiemTra: "", nguoiPheDuyet: "",
     mucDichLoai: "san_xuat", loSanXuat: "",
+    ...prefill,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -147,6 +165,10 @@ function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTr
     if (!form.soOng || Number(form.soOng) <= 0) { setError("Số ống là bắt buộc."); return false; }
     if (canLoSanXuat && !form.loSanXuat.trim()) {
       setError('Xuất để "Sản xuất" thì phải điền Số lô sản xuất.');
+      return false;
+    }
+    if (prefill && (!form.nguoiKiemTra.trim() || !form.nguoiPheDuyet.trim())) {
+      setError("Duyệt đề nghị xuất phải điền đủ Người kiểm tra và Người phê duyệt.");
       return false;
     }
     return true;
@@ -176,6 +198,7 @@ function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTr
       }
       onNewPeople?.({ thucHien: form.nguoiThucHien, kiemTra: form.nguoiKiemTra, pheDuyet: form.nguoiPheDuyet });
       onDone(updated);
+      await onApproved?.();
       onClose();
     } catch (err) {
       if (openWin) openWin.close(); // đóng luôn cửa sổ trắng đã mở nếu lưu lỗi
@@ -200,10 +223,16 @@ function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTr
       <form onSubmit={submit} onClick={(e) => e.stopPropagation()}
         className="bg-white rounded-lg border border-slate-200 w-full max-w-md">
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-          <div className="font-semibold text-sm">{MOVEMENT_LABEL[loai]} — lô {lot.soLo}</div>
+          <div className="font-semibold text-sm">{prefill ? "Duyệt đề nghị xuất" : MOVEMENT_LABEL[loai]} — lô {lot.soLo}</div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-4 space-y-3">
+          {prefill && (
+            <div className="bg-sky-50 border border-sky-200 rounded-md p-2.5 text-xs text-sky-700">
+              Dữ liệu điền sẵn từ đề nghị xuất — sửa lại nếu cần, rồi bắt buộc điền thêm Người kiểm tra/Người
+              phê duyệt trước khi lưu.
+            </div>
+          )}
           <div className="text-xs text-slate-500">
             Tồn hiện tại: <span className="font-medium text-slate-800">{lot.soOng ?? 0} ống</span>
             {" · "}{DIEU_KIEN_LUU_LABEL[lot.dieuKienLuu] || "chưa gán kho"}
@@ -281,6 +310,95 @@ function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTr
           <button type="submit" disabled={saving}
             className={`flex items-center gap-2 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50 ${laXuat ? "bg-slate-800 hover:bg-slate-900" : "bg-emerald-600 hover:bg-emerald-700"}`}>
             {saving && <Loader2 className="w-4 h-4 animate-spin" />} Lưu
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/** QC gửi đề nghị xuất — KHÔNG ghi vào lenmen_seed_movements, không trừ tồn, không có Người
+ * kiểm tra/Người phê duyệt (việc của admin lúc duyệt). Rút gọn từ MovementModal, chỉ đúng
+ * các trường NCV yêu cầu QC nhập: Số ống, Ngày, Mục đích (+ Lô sản xuất nếu Sản xuất),
+ * Người xuất. RLS chặn insert cho ai không phải admin/QC — nút gọi modal này cũng đã ẩn với
+ * vai trò khác ở ngoài (canXuatChung). */
+function ExportRequestModal({ lot, actorId, people = { thucHien: [] }, onNewPeople, onClose, onDone }) {
+  const [form, setForm] = useState({
+    soOng: "", ngay: new Date().toISOString().slice(0, 10),
+    mucDichLoai: "san_xuat", loSanXuat: "", nguoiThucHien: "", ghiChu: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const canLoSanXuat = form.mucDichLoai === "san_xuat";
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.soOng || Number(form.soOng) <= 0) { setError("Số ống là bắt buộc."); return; }
+    if (canLoSanXuat && !form.loSanXuat.trim()) {
+      setError('Xuất để "Sản xuất" thì phải điền Số lô sản xuất.');
+      return;
+    }
+    setSaving(true); setError("");
+    try {
+      await createExportRequest({ ...form, seedLotId: lot.id, loSanXuat: canLoSanXuat ? form.loSanXuat : null }, actorId);
+      onNewPeople?.({ thucHien: form.nguoiThucHien });
+      onDone();
+      onClose();
+    } catch (err) { setError(err.message || String(err)); }
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <form onSubmit={submit} onClick={(e) => e.stopPropagation()}
+        className="bg-white rounded-lg border border-slate-200 w-full max-w-md">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+          <div className="font-semibold text-sm">Đề nghị xuất — lô {lot.soLo}</div>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="p-4 space-y-3">
+          <div className="bg-sky-50 border border-sky-200 rounded-md p-2.5 text-xs text-sky-700">
+            Đề nghị này CHƯA trừ tồn kho, CHƯA vào Nhật ký xuất/nhập — admin duyệt xong mới
+            chính thức ghi nhận.
+          </div>
+          <div className="text-xs text-slate-500">
+            Tồn hiện tại: <span className="font-medium text-slate-800">{lot.soOng ?? 0} ống</span>
+          </div>
+          <div className="flex gap-3">
+            <div><label className="text-xs text-slate-500">Số ống *</label>
+              <input required inputMode="numeric" min="1" value={form.soOng} onChange={set("soOng")}
+                className={`block mt-1 ${inputCls} w-28 text-right`} /></div>
+            <div><label className="text-xs text-slate-500">Ngày xuất</label>
+              <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+          </div>
+          <div>
+            <label className="text-xs text-slate-500">Mục đích xuất *</label>
+            <select value={form.mucDichLoai} onChange={set("mucDichLoai")} className={`block mt-1 ${inputCls} w-full bg-white`}>
+              {MUC_DICH_XUAT.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          </div>
+          {canLoSanXuat && (
+            <div><label className="text-xs text-slate-500">Số lô sản xuất *</label>
+              <input required value={form.loSanXuat} onChange={set("loSanXuat")} placeholder="030825BSM"
+                className={`block mt-1 ${inputCls} w-full font-mono`} /></div>
+          )}
+          <datalist id="dnx-nguoi-thuc-hien-list">
+            {people.thucHien.map((p) => <option key={p} value={p} />)}
+          </datalist>
+          <div><label className="text-xs text-slate-500">Người xuất (Họ và tên)</label>
+            <input list="dnx-nguoi-thuc-hien-list" value={form.nguoiThucHien} onChange={set("nguoiThucHien")}
+              className={`block mt-1 ${inputCls} w-full`} /></div>
+          <div><label className="text-xs text-slate-500">Ghi chú thêm</label>
+            <input value={form.ghiChu} onChange={set("ghiChu")} placeholder="không bắt buộc"
+              className={`block mt-1 ${inputCls} w-full`} /></div>
+          {error && <p className="text-xs text-rose-600">{error}</p>}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 px-3">Huỷ bỏ</button>
+          <button type="submit" disabled={saving}
+            className="flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50">
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} Gửi đề nghị xuất
           </button>
         </div>
       </form>
@@ -451,24 +569,100 @@ function MovementLog({ moves, lot, fallbackTen, isAdmin, onEdit }) {
   );
 }
 
+/* ------------------------------ Đề nghị xuất ------------------------------ */
+
+/** Hàng chờ duyệt — admin thấy đề nghị của mọi người (nút "Duyệt"), QC chỉ thấy đề nghị của
+ * chính mình (RLS đã lọc sẵn ở fetchExportRequests, không lọc lại ở đây) và chỉ có nút rút. */
+function RequestQueue({ requests, lots, profilesById, isAdmin, onApprove, onDeleteReq }) {
+  const lotById = useMemo(() => Object.fromEntries(lots.map((l) => [l.id, l])), [lots]);
+  if (!requests.length) {
+    return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Không có đề nghị nào đang chờ.</div>;
+  }
+  const nameOf = (id) => {
+    if (!id) return "–";
+    const p = profilesById?.[id];
+    return p?.fullName || p?.email || "–";
+  };
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 overflow-x-auto">
+      <table className="w-full text-xs whitespace-nowrap">
+        <thead className="bg-slate-50">
+          <tr>
+            {["Ngày đề nghị", "Lô", "Số ống", "Mục đích", "Lô sản xuất", "Người xuất", "Người đề nghị", ""].map((h) => (
+              <th key={h} className="px-3 py-2 text-left font-medium text-[11px] text-slate-400">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {requests.map((r) => {
+            const lot = lotById[r.seedLotId];
+            return (
+              <tr key={r.id} className="border-t border-slate-100">
+                <td className="px-3 py-1.5">{fmtDate(r.ngay)}</td>
+                <td className="px-3 py-1.5">
+                  {lot ? <><span className="font-mono font-medium">{lot.soLo}</span> <span className="text-slate-400">· {lot.maChung}</span></> : "(lô đã xoá)"}
+                </td>
+                <td className="px-3 py-1.5 text-right font-medium">{r.soOng}</td>
+                <td className="px-3 py-1.5">{r.mucDichLoai ? MUC_DICH_LABEL[r.mucDichLoai] : "–"}</td>
+                <td className="px-3 py-1.5 font-mono">{r.loSanXuat || "–"}</td>
+                <td className="px-3 py-1.5">{r.nguoiThucHien || "–"}</td>
+                <td className="px-3 py-1.5">{nameOf(r.createdBy)}</td>
+                <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                  <div className="flex items-center justify-end gap-2">
+                    {isAdmin && lot && (
+                      <button onClick={() => onApprove(r, lot)} title="Duyệt — mở form Xuất đã điền sẵn"
+                        className="flex items-center gap-1 text-xs border border-emerald-300 text-emerald-700 rounded-md px-2 py-1 hover:bg-emerald-50">
+                        <Check className="w-3.5 h-3.5" /> Duyệt
+                      </button>
+                    )}
+                    <button onClick={() => onDeleteReq(r)} title={isAdmin ? "Xoá đề nghị" : "Rút đề nghị"}
+                      className="text-slate-400 hover:text-rose-500">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* --------------------------------- Huỷ lô --------------------------------- */
 
-function HuyModal({ lot, onClose, onDone }) {
-  // Mặc định huỷ hết số đang tồn — trường hợp thường gặp là bỏ cả lô quá hạn.
+/** Huỷ 1 hoặc nhiều lô cùng lúc — `lots` luôn là mảng (1 phần tử = huỷ 1 lô như trước, nhiều
+ * phần tử = huỷ hàng loạt theo lô đã tích chọn). Huỷ hàng loạt luôn huỷ HẾT số đang tồn của
+ * từng lô (không cho sửa số ống riêng từng lô trong 1 form — muốn huỷ 1 phần thì huỷ lẻ). */
+function HuyModal({ lots, onClose, onDone }) {
+  const isBulk = lots.length > 1;
   const [form, setForm] = useState({
-    soOng: String(lot.soOng ?? 0), ngay: new Date().toISOString().slice(0, 10),
-    lyDo: "", nguoiThucHien: "",
+    soOng: String(lots[0].soOng ?? 0), ngay: new Date().toISOString().slice(0, 10),
+    lyDoChon: LY_DO_HUY_OPTIONS[0], lyDoKhac: "", nguoiThucHien: "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const lyDo = form.lyDoChon === "Khác" ? form.lyDoKhac.trim() : form.lyDoChon;
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!form.lyDo.trim()) { setError("Phải ghi lý do huỷ."); return; }
+    if (!lyDo) { setError("Phải ghi lý do huỷ."); return; }
     setSaving(true); setError("");
-    try { onDone(await huyLot(lot, form)); onClose(); }
-    catch (err) { setError(err.message || String(err)); }
+    const loi = [];
+    for (const lot of lots) {
+      try {
+        const updated = await huyLot(lot, {
+          soOng: isBulk ? lot.soOng : form.soOng, ngay: form.ngay, lyDo, nguoiThucHien: form.nguoiThucHien,
+        });
+        onDone(updated);
+      } catch (err) {
+        loi.push(`${lot.soLo}: ${err.message || String(err)}`);
+      }
+    }
+    if (loi.length) setError(`Huỷ lỗi ${loi.length}/${lots.length} lô — ${loi.join("; ")}`);
+    else onClose();
     setSaving(false);
   };
 
@@ -477,7 +671,7 @@ function HuyModal({ lot, onClose, onDone }) {
       <form onSubmit={submit} onClick={(e) => e.stopPropagation()}
         className="bg-white rounded-lg border border-slate-200 w-full max-w-md">
         <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
-          <div className="font-semibold text-sm">Huỷ lô {lot.soLo}</div>
+          <div className="font-semibold text-sm">{isBulk ? `Huỷ ${lots.length} lô đã chọn` : `Huỷ lô ${lots[0].soLo}`}</div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-4 space-y-3">
@@ -485,17 +679,39 @@ function HuyModal({ lot, onClose, onDone }) {
             Huỷ là bỏ đi, khác với xuất dùng. Lô sẽ bị đánh dấu <b>Đã huỷ</b> và không xuất/nhập được nữa.
             Nhật ký vẫn giữ nguyên vết.
           </div>
-          <div className="flex gap-3">
-            <div><label className="text-xs text-slate-500">Số ống huỷ</label>
-              <input required inputMode="numeric" value={form.soOng} onChange={set("soOng")}
-                className={`block mt-1 ${inputCls} w-28 text-right`} />
-              <p className="text-[11px] text-slate-400 mt-0.5">Đang tồn {lot.soOng ?? 0}</p></div>
+          {isBulk ? (
+            <div className="max-h-32 overflow-y-auto border border-slate-200 rounded-md divide-y divide-slate-100">
+              {lots.map((l) => (
+                <div key={l.id} className="flex items-center justify-between px-2.5 py-1.5 text-xs">
+                  <span><span className="font-mono font-medium">{l.soLo}</span> · {l.maChung}</span>
+                  <span className="text-slate-500">{l.soOng ?? 0} ống</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex gap-3">
+              <div><label className="text-xs text-slate-500">Số ống huỷ</label>
+                <input required inputMode="numeric" value={form.soOng} onChange={set("soOng")}
+                  className={`block mt-1 ${inputCls} w-28 text-right`} />
+                <p className="text-[11px] text-slate-400 mt-0.5">Đang tồn {lots[0].soOng ?? 0}</p></div>
+              <div><label className="text-xs text-slate-500">Ngày huỷ</label>
+                <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+            </div>
+          )}
+          {isBulk && (
             <div><label className="text-xs text-slate-500">Ngày huỷ</label>
               <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+          )}
+          <div>
+            <label className="text-xs text-slate-500">Lý do huỷ *</label>
+            <select value={form.lyDoChon} onChange={set("lyDoChon")} className={`block mt-1 ${inputCls} w-full bg-white`}>
+              {LY_DO_HUY_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            {form.lyDoChon === "Khác" && (
+              <input required value={form.lyDoKhac} onChange={set("lyDoKhac")} placeholder="Ghi rõ lý do…"
+                className={`block mt-2 ${inputCls} w-full`} />
+            )}
           </div>
-          <div><label className="text-xs text-slate-500">Lý do huỷ *</label>
-            <input required value={form.lyDo} onChange={set("lyDo")} placeholder="Quá hạn dùng / nhiễm / hỏng tủ…"
-              className={`block mt-1 ${inputCls} w-full`} /></div>
           <div><label className="text-xs text-slate-500">Người thực hiện</label>
             <input value={form.nguoiThucHien} onChange={set("nguoiThucHien")} className={`block mt-1 ${inputCls} w-full`} /></div>
           {error && <p className="text-xs text-rose-600">{error}</p>}
@@ -504,7 +720,7 @@ function HuyModal({ lot, onClose, onDone }) {
           <button type="button" onClick={onClose} className="text-sm text-slate-500 hover:text-slate-700 px-3">Huỷ bỏ</button>
           <button type="submit" disabled={saving}
             className="flex items-center gap-2 bg-rose-600 hover:bg-rose-700 text-white text-sm px-4 py-2 rounded-md disabled:opacity-50">
-            {saving && <Loader2 className="w-4 h-4 animate-spin" />} Xác nhận huỷ
+            {saving && <Loader2 className="w-4 h-4 animate-spin" />} {isBulk ? `Xác nhận huỷ ${lots.length} lô` : "Xác nhận huỷ"}
           </button>
         </div>
       </form>
@@ -644,7 +860,7 @@ function StabilityMatrix({ lot, points, protocol, onSave }) {
 
 /* --------------------------------- Panel --------------------------------- */
 
-export default function SeedLotPanel({ isAdmin }) {
+export default function SeedLotPanel({ isAdmin, isQC, canXuatChung, actorId, profilesById = {}, setNote }) {
   const [lots, setLots] = useState([]);
   const [protocol, setProtocol] = useState([]);
   const [stability, setStability] = useState({});
@@ -660,8 +876,10 @@ export default function SeedLotPanel({ isAdmin }) {
   const [denNgay, setDenNgay] = useState("");
   const [trangThai, setTrangThai] = useState("ALL");
   const [labelLot, setLabelLot] = useState(null);
-  const [moveCtx, setMoveCtx] = useState(null);   // { lot, loai }
-  const [huyLotCtx, setHuyLotCtx] = useState(null);
+  const [moveCtx, setMoveCtx] = useState(null);   // { lot, loai, prefill?, onApproved? }
+  const [requestCtx, setRequestCtx] = useState(null); // lô đang gửi đề nghị xuất (QC)
+  const [huyLotCtx, setHuyLotCtx] = useState(null); // mảng lô đang huỷ (1 phần tử = huỷ lẻ)
+  const [selected, setSelected] = useState(new Set()); // id lô đã tích chọn để huỷ hàng loạt
   const [editCtx, setEditCtx] = useState(null); // { move, lot } — sửa 1 lượt xuất/nhập đã lưu (chỉ admin)
   const [view, setView] = useState("kho");       // "kho" | "baocao"
   const [allStability, setAllStability] = useState([]);
@@ -705,6 +923,15 @@ export default function SeedLotPanel({ isAdmin }) {
       return next;
     });
   }, []);
+
+  // Đề nghị xuất chờ duyệt — RLS tự lọc theo người gọi (QC chỉ thấy của mình, admin thấy
+  // hết), không cần lọc lại ở JS. Tách khỏi load() chính vì phụ thuộc migration riêng
+  // (migration_lenmen_giong_de_nghi_xuat.sql) — thiếu thì chỉ mất tab này, không sập trang.
+  const [requests, setRequests] = useState([]);
+  const reloadRequests = useCallback(() => {
+    fetchExportRequests().then(setRequests).catch(() => {});
+  }, []);
+  useEffect(() => { reloadRequests(); }, [reloadRequests]);
 
   // Chỉ nạp mốc theo dõi + nhật ký kho khi mở lô ra xem — sổ có thể vài trăm lô.
   const toggle = async (lot) => {
@@ -750,6 +977,42 @@ export default function SeedLotPanel({ isAdmin }) {
   const dsMaChung = useMemo(
     () => [...new Set(lots.map((l) => l.maChung).filter(Boolean))].sort(), [lots]
   );
+
+  // In sổ lịch sử xuất/nhập của 1 lô — gộp toàn bộ movements (không chỉ phần đã cache) thành
+  // 1 bảng có số dư chạy. Mở cửa sổ NGAY lúc bấm (đồng bộ) rồi mới fetch nếu cần, đúng kỹ
+  // thuật đã dùng ở "In phiếu" — mở sau 1 bước async sẽ bị trình duyệt chặn popup.
+  const inSoLo = async (lot) => {
+    const w = window.open("", "_blank");
+    if (!w) { alert("Trình duyệt chặn cửa sổ bật lên — cho phép pop-up rồi thử lại."); return; }
+    let moves = movements[lot.id];
+    if (!moves) {
+      moves = await fetchMovements(lot.id);
+      setMovements((m) => ({ ...m, [lot.id]: moves }));
+    }
+    w.document.write(renderSoLoHistoryHTML({ lot, ten: tenLoaiCuaLo(lot, loaiTheoMa[lot.maChung]), movements: moves }));
+    w.document.close();
+  };
+
+  // In bảng kiểm kê — theo đúng tủ đang chọn ở bộ lọc, hoặc gộp tất cả tủ (+ "Chưa gán kho")
+  // nếu đang xem "Tất cả kho". Chỉ lấy lô còn hàng thật (chưa huỷ, còn ống) — không có gì để
+  // đếm thì không liệt kê. Dùng thẳng `lots` (đầy đủ), không phụ thuộc ô tìm kiếm/bộ lọc khác.
+  const inKiemKe = () => {
+    const khoList = kho === "ALL" ? [...KHO_KEYS, "chua_ro"] : [kho];
+    const groups = khoList.map((k) => {
+      const rows = lots
+        .filter((l) => !l.daHuy && (l.soOng ?? 0) > 0 && (k === "chua_ro" ? !l.dieuKienLuu : l.dieuKienLuu === k))
+        .map((l) => ({
+          maChung: l.maChung, tenChung: tenLoaiCuaLo(l, loaiTheoMa[l.maChung]), soLo: l.soLo,
+          viTri: l.viTri, ngaySanXuat: l.ngaySanXuat, hanSuDung: l.hanSuDung, soOng: l.soOng,
+        }))
+        .sort((a, b) => a.maChung.localeCompare(b.maChung) || a.soLo.localeCompare(b.soLo));
+      return { khoLabel: k === "chua_ro" ? "Chưa gán kho" : DIEU_KIEN_LUU_LABEL[k], rows };
+    }).filter((g) => g.rows.length > 0 || khoList.length === 1); // xem 1 tủ cụ thể thì vẫn in dù rỗng, gộp tất cả thì bỏ tủ rỗng cho gọn
+    const khoLabelFallback = kho === "chua_ro" ? "Chưa gán kho" : (DIEU_KIEN_LUU_LABEL[kho] || "");
+    const ok = printKiemKe({ groups: groups.length ? groups : [{ khoLabel: khoLabelFallback, rows: [] }] });
+    if (!ok) alert("Trình duyệt chặn cửa sổ bật lên — cho phép pop-up rồi thử lại.");
+  };
+
   const coLoc = kho !== "ALL" || loai !== "ALL" || maChung !== "ALL" || tuNgay || denNgay || trangThai !== "ALL" || q;
   const xoaLoc = () => { setKho("ALL"); setLoai("ALL"); setMaChung("ALL"); setTuNgay(""); setDenNgay(""); setTrangThai("ALL"); setQ(""); };
 
@@ -775,6 +1038,18 @@ export default function SeedLotPanel({ isAdmin }) {
         .toLowerCase().includes(needle);
     });
   }, [lots, q, kho, loai, maChung, tuNgay, denNgay, trangThai, loaiTheoMa]);
+
+  // Chọn hàng loạt để huỷ — chỉ tính lô CHƯA huỷ, và chỉ trong phạm vi đang lọc/hiện trên màn
+  // hình (đỡ huỷ nhầm lô đang bị ẩn bởi bộ lọc). "Chọn tất cả" bật/tắt theo đúng tập này.
+  const selectableFiltered = useMemo(() => filtered.filter((l) => !l.daHuy), [filtered]);
+  const allSelected = selectableFiltered.length > 0 && selectableFiltered.every((l) => selected.has(l.id));
+  const toggleSelectAll = () => setSelected(allSelected ? new Set() : new Set(selectableFiltered.map((l) => l.id)));
+  const toggleSelectOne = (id) => setSelected((s) => {
+    const next = new Set(s);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const selectedLots = lots.filter((l) => selected.has(l.id));
 
   if (loading) {
     return <div className="flex items-center justify-center gap-2 text-slate-400 text-sm py-16">
@@ -803,13 +1078,43 @@ export default function SeedLotPanel({ isAdmin }) {
         <button className={tabCls(view === "baocao")} onClick={() => setView("baocao")}>
           <BarChart3 className="w-3.5 h-3.5" /> Thống kê / Báo cáo
         </button>
+        {canXuatChung && (
+          <button className={tabCls(view === "de_nghi")} onClick={() => setView("de_nghi")}>
+            <ClipboardList className="w-3.5 h-3.5" /> Đề nghị xuất
+            {requests.length > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-600 text-white">{requests.length}</span>
+            )}
+          </button>
+        )}
       </div>
 
       {view === "baocao" && <SeedReport lots={lots} allStability={allStability} protocol={protocol} />}
 
+      {view === "de_nghi" && canXuatChung && (
+        <RequestQueue requests={requests} lots={lots} profilesById={profilesById} isAdmin={isAdmin}
+          onApprove={(req, lot) => setMoveCtx({
+            lot, loai: "xuat",
+            prefill: {
+              soOng: String(req.soOng), ngay: req.ngay, mucDichLoai: req.mucDichLoai || "san_xuat",
+              loSanXuat: req.loSanXuat || "", nguoiThucHien: req.nguoiThucHien || "", mucDich: req.ghiChu || "",
+            },
+            onApproved: async () => { await deleteExportRequest(req.id); reloadRequests(); },
+          })}
+          onDeleteReq={(req) => {
+            if (!window.confirm(`${isAdmin ? "Xoá" : "Rút"} đề nghị xuất ${req.soOng} ống này?`)) return;
+            deleteExportRequest(req.id).then(reloadRequests);
+          }} />
+      )}
+
       {view === "kho" && (<>
       <KhoCards lots={lots} active={kho} setActive={setKho} />
-      <AddLotForm onAdd={addLot} />
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+        <AddLotForm onAdd={addLot} />
+        <button onClick={inKiemKe}
+          className="flex items-center gap-2 border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+          <Printer className="w-4 h-4" /> In kiểm kê{kho === "ALL" ? " (tất cả kho)" : ` — ${kho === "chua_ro" ? "Chưa gán kho" : DIEU_KIEN_LUU_LABEL[kho]}`}
+        </button>
+      </div>
 
       <div className="bg-white rounded-lg border border-slate-200 p-4 mb-3 flex flex-wrap items-end gap-3">
         <div className="flex-1 min-w-[220px]">
@@ -869,67 +1174,125 @@ export default function SeedLotPanel({ isAdmin }) {
         </div>
       </div>
 
+      {!isQC && selectableFiltered.length > 0 && (
+        <div className="bg-white rounded-lg border border-slate-200 px-4 py-2 mb-3 flex items-center gap-3 text-xs">
+          <label className="flex items-center gap-1.5 text-slate-600 cursor-pointer">
+            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+            Chọn tất cả ({selectableFiltered.length} lô đang hiện)
+          </label>
+          {selected.size > 0 && (
+            <>
+              <span className="text-slate-400">Đã chọn {selected.size} lô</span>
+              <button onClick={() => setHuyLotCtx(selectedLots)}
+                className="flex items-center gap-1 text-rose-600 border border-rose-200 rounded-md px-2 py-1 hover:bg-rose-50 ml-auto">
+                <Trash2 className="w-3.5 h-3.5" /> Huỷ {selected.size} lô đã chọn
+              </button>
+              <button onClick={() => setSelected(new Set())} className="text-slate-400 hover:text-slate-600">Bỏ chọn</button>
+            </>
+          )}
+        </div>
+      )}
+
       {filtered.length === 0 ? (
         <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">
           Không có lô nào khớp bộ lọc.
         </div>
       ) : (
         <div className="space-y-2">
+          <div className={`${LOT_ROW1_GRID} px-4 text-[11px] text-slate-400`}>
+            <span /><span />
+            <span>Số lô</span><span>Mã chủng</span><span>Tên chủng</span>
+            <span className="text-right">Thao tác</span>
+          </div>
           {filtered.map((lot) => {
             const isOpen = expanded === lot.id;
             const months = monthsSince(lot.ngaySanXuat);
             const hetHan = lot.hanSuDung && new Date(lot.hanSuDung) < new Date();
             return (
               <div key={lot.id} className={`bg-white rounded-lg border overflow-hidden ${lot.daHuy ? "border-slate-200 opacity-70" : "border-slate-200"}`}>
-                <div className="px-4 py-3 flex items-center gap-3 flex-wrap">
-                  <button onClick={() => toggle(lot)} className="flex items-center gap-3 flex-1 min-w-0 text-left">
-                    {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
-                    <span className="font-mono text-sm font-medium">{lot.soLo}</span>
-                    <span className="font-mono text-xs text-slate-500"
-                      title={(() => { const g = giaiMaChung(lot.maChung); return g ? `${g.tienMa} · ${g.loai} · ${g.nhaCungCap} · ${g.dangLuu}` : ""; })()}>
-                      {lot.maChung}
-                    </span>
-                    <span className="text-xs text-slate-600 flex-1 truncate">
-                      {lot.tenChung || loaiTheoMa[lot.maChung] || "–"}
-                    </span>
-                  </button>
-                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 whitespace-nowrap">
-                    {DIEU_KIEN_LUU_LABEL[lot.dieuKienLuu] || "Chưa gán kho"}
-                  </span>
-                  <span className={`text-xs font-medium whitespace-nowrap ${(lot.soOng ?? 0) === 0 ? "text-slate-300" : "text-slate-800"}`}>
-                    {lot.soOng ?? 0} ống
-                  </span>
-                  {hetHan && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 whitespace-nowrap">Quá hạn</span>
-                  )}
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">
-                    NSX {fmtDate(lot.ngaySanXuat)}{months != null ? ` · ${months} tháng` : ""}
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    {lot.daHuy ? (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 whitespace-nowrap"
-                        title={[lot.lyDoHuy, lot.ngayHuy ? "ngày " + fmtDate(lot.ngayHuy) : ""].filter(Boolean).join(" — ")}>
-                        Đã huỷ
+                <div className="px-4 pt-3 pb-2">
+                  <div className={`${LOT_ROW1_GRID}`}>
+                    <div className="flex items-center">
+                      {!isQC && !lot.daHuy && (
+                        <input type="checkbox" checked={selected.has(lot.id)} onChange={() => toggleSelectOne(lot.id)}
+                          onClick={(e) => e.stopPropagation()} className="shrink-0" title="Chọn để huỷ hàng loạt" />
+                      )}
+                    </div>
+                    {/* display:contents — nút vẫn bắt click, nhưng không tự tạo box riêng, để 3
+                        span con nằm ĐÚNG vào 3 cột lưới của hàng thay vì gộp chung 1 cột co giãn
+                        như flex trước đây (khiến các hàng lệch cột nhau vì độ dài chữ khác nhau). */}
+                    <button onClick={() => toggle(lot)} className="contents cursor-pointer">
+                      {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" /> : <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />}
+                      <span className="font-mono text-sm font-medium truncate text-left">{lot.soLo}</span>
+                      <span className="font-mono text-xs text-slate-500 truncate text-left"
+                        title={(() => { const g = giaiMaChung(lot.maChung); return g ? `${g.tienMa} · ${g.loai} · ${g.nhaCungCap} · ${g.dangLuu}` : ""; })()}>
+                        {lot.maChung}
                       </span>
-                    ) : (<>
-                    <button onClick={() => setMoveCtx({ lot, loai: "nhap" })} title="Nhập kho"
-                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 hover:bg-slate-50">
-                      <ArrowDownToLine className="w-3.5 h-3.5" /> Nhập
+                      <span className="text-xs text-slate-600 truncate text-left">
+                        {lot.tenChung || loaiTheoMa[lot.maChung] || "–"}
+                      </span>
                     </button>
-                    <button onClick={() => setMoveCtx({ lot, loai: "xuat" })} title="Xuất kho"
-                      disabled={(lot.soOng ?? 0) === 0}
-                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
-                      <ArrowUpFromLine className="w-3.5 h-3.5" /> Xuất
-                    </button>
-                    <button onClick={() => setHuyLotCtx(lot)} title="Huỷ lô"
-                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 text-rose-600 hover:bg-rose-50 hover:border-rose-300">
-                      <Trash2 className="w-3.5 h-3.5" /> Huỷ
-                    </button>
-                    </>)}
-                    <button onClick={() => setLabelLot(lot)} title="Tạo nhãn ống và nhãn hộp"
-                      className="flex items-center gap-1 text-xs border border-slate-300 rounded-md px-2 py-1 hover:bg-slate-50">
-                      <Tag className="w-3.5 h-3.5" /> Nhãn
-                    </button>
+                    {/* Icon-only + title (hover ra chữ) thay vì icon+chữ — 5 nút cùng lúc (Nhập/
+                        Xuất/Huỷ/Nhãn/Kiểm kê lô) mà để chữ đầy đủ thì không đủ chỗ, bị dồn xuống
+                        nhiều dòng trông rối. Cùng kiểu nút tròn nhỏ như cột thao tác ở Nhật ký
+                        xuất/nhập bên dưới. */}
+                    <div className="flex items-center justify-end gap-1 flex-nowrap">
+                      {lot.daHuy ? (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-rose-100 text-rose-700 whitespace-nowrap"
+                          title={[lot.lyDoHuy, lot.ngayHuy ? "ngày " + fmtDate(lot.ngayHuy) : ""].filter(Boolean).join(" — ")}>
+                          Đã huỷ
+                        </span>
+                      ) : (<>
+                      {!isQC && (
+                        <button onClick={() => setMoveCtx({ lot, loai: "nhap" })} title="Nhập kho"
+                          className="p-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
+                          <ArrowDownToLine className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {canXuatChung && (
+                        <button
+                          onClick={() => (isAdmin ? setMoveCtx({ lot, loai: "xuat" }) : setRequestCtx(lot))}
+                          title={isAdmin ? "Xuất kho" : "Gửi đề nghị xuất — admin sẽ duyệt"}
+                          disabled={(lot.soOng ?? 0) === 0}
+                          className="p-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed">
+                          <ArrowUpFromLine className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {!isQC && (
+                        <button onClick={() => setHuyLotCtx([lot])} title="Huỷ lô"
+                          className="p-1.5 rounded-md border border-slate-300 text-rose-600 hover:bg-rose-50 hover:border-rose-300">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      </>)}
+                      {!isQC && (<>
+                      <button onClick={() => setLabelLot(lot)} title="Tạo nhãn ống và nhãn hộp"
+                        className="p-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
+                        <Tag className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => inSoLo(lot)} title="In sổ lịch sử xuất/nhập của lô này"
+                        className="p-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
+                        <BookOpen className="w-3.5 h-3.5" />
+                      </button>
+                      </>)}
+                    </div>
+                  </div>
+                  {/* Hàng 2 — thông tin phụ (kho/tồn/quá hạn/NSX), thụt vào ngang mã lô để tách
+                      khỏi hàng định danh + thao tác ở trên cho thoáng. */}
+                  <div className={`${LOT_ROW2_GRID} mt-1.5`}>
+                    <span />
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 whitespace-nowrap justify-self-start">
+                      {DIEU_KIEN_LUU_LABEL[lot.dieuKienLuu] || "Chưa gán kho"}
+                    </span>
+                    <span className={`text-xs font-medium whitespace-nowrap ${(lot.soOng ?? 0) === 0 ? "text-slate-300" : "text-slate-800"}`}>
+                      {lot.soOng ?? 0} ống
+                    </span>
+                    <span className={`text-[11px] px-2 py-0.5 rounded-full whitespace-nowrap justify-self-start ${hetHan ? "bg-rose-100 text-rose-700" : "invisible"}`}>
+                      Quá hạn
+                    </span>
+                    <span className="text-[11px] text-slate-400 whitespace-nowrap">
+                      NSX {fmtDate(lot.ngaySanXuat)}{months != null ? ` · ${months} tháng` : ""}
+                    </span>
                   </div>
                 </div>
 
@@ -980,13 +1343,18 @@ export default function SeedLotPanel({ isAdmin }) {
 
       {labelLot && <SeedLabelModal lot={labelLot} onClose={() => setLabelLot(null)} />}
       {huyLotCtx && (
-        <HuyModal lot={huyLotCtx} onClose={() => setHuyLotCtx(null)}
+        <HuyModal lots={huyLotCtx} onClose={() => { setHuyLotCtx(null); setSelected(new Set()); }}
           onDone={(updated) => afterMove(updated)} />
       )}
       {moveCtx && (
         <MovementModal lot={moveCtx.lot} loai={moveCtx.loai} fallbackTen={loaiTheoMa[moveCtx.lot.maChung]}
-          people={people} onNewPeople={addPeople}
+          people={people} onNewPeople={addPeople} prefill={moveCtx.prefill} onApproved={moveCtx.onApproved}
           onClose={() => setMoveCtx(null)} onDone={afterMove} />
+      )}
+      {requestCtx && (
+        <ExportRequestModal lot={requestCtx} actorId={actorId} people={people} onNewPeople={addPeople}
+          onClose={() => setRequestCtx(null)}
+          onDone={() => { setNote?.("Đã gửi đề nghị xuất — chờ admin duyệt."); reloadRequests(); }} />
       )}
       {editCtx && (
         <EditMovementModal move={editCtx.move} lot={editCtx.lot} people={people} onNewPeople={addPeople}

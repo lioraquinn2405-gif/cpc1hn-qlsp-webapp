@@ -497,6 +497,12 @@ function Connected({ session, profile }) {
   // ngoại lệ. Xem thêm memory feedback_role_permissions.
   const canEditNL = isAdmin;
   const canEditQcResults = isAdmin || profile.role === "qc";
+  // Bảo quản chủng giống: chỉ admin + QC được xuất chủng (QC chỉ gửi đề nghị, admin duyệt
+  // mới ghi thật vào lịch sử — xem migration_lenmen_giong_de_nghi_xuat.sql). QC chỉ được gửi
+  // đề nghị xuất + xem tồn — không đụng Nhập/Huỷ/Nhãn/Sổ lô (isQC tách riêng khỏi
+  // canXuatChung để không ảnh hưởng vai trò khác đang xem được các nút đó bình thường).
+  const isQC = profile.role === "qc";
+  const canXuatChung = isAdmin || isQC;
   const canEditProduction = isAdmin || profile.role === "rd";
   const canPreviewPlan = isAdmin || profile.role === "rd" || profile.role === "kh";
 
@@ -792,7 +798,7 @@ function Connected({ session, profile }) {
               {tab === "sp" && <ProductPanel products={products} setProducts={setProducts} setNote={setNote} isAdmin={isAdmin} canEdit={canEditProduction} />}
               {tab === "sp-history" && <ProductionHistoryPanel products={products} setNote={setNote} focusMaSP={spFocus?.maSP} focusTs={spFocus?.ts} canEdit={canEditProduction} />}
               {LENMEN_TABS.some((t) => t.key === tab) && <LenMenPanel tab={tab} materials={materials} actorId={actorId} setNote={setNote} />}
-              {tab === "giong" && <SeedLotPanel isAdmin={isAdmin} />}
+              {tab === "giong" && <SeedLotPanel isAdmin={isAdmin} isQC={isQC} canXuatChung={canXuatChung} actorId={actorId} profilesById={profilesById} setNote={setNote} />}
               {tab === "users" && isAdmin && <UsersPanel profiles={profiles} onUpdate={updateUserProfile} currentUserId={actorId} onCreated={reload} />}
               {tab === "account" && <AccountSettingsPanel session={session} profile={profile} />}
             </>
