@@ -1352,8 +1352,8 @@ function MaterialGroupTable({
   // JSX bên dưới — không tạo luật quyền mới.
   const EDITABLE_COLUMNS = useMemo(() => {
     const cols = [];
-    if (!roGeneral) cols.push({ key: "thoiGianThu", type: "date" });
-    if (!roGeneral) cols.push({ key: "loChung", type: "text" });
+    // Thời gian thu/Lô chủng KHÔNG nằm trong lưới chọn/copy/dán nữa — đã chuyển lên sửa
+    // 1 lần ở thanh tiêu đề nhóm (áp dụng luôn cho cả lô), không còn là cột riêng của bảng.
     if (!roGeneral) cols.push({ key: "vDich", type: "number" });
     if (!roQcFields) cols.push({ key: "camQuan", type: "text" });
     if (!roQcFields) cols.push({ key: "pH", type: "number" });
@@ -1494,13 +1494,40 @@ function MaterialGroupTable({
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-      <div className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-50 hover:bg-slate-100">
+      <div className="w-full flex items-center gap-3 px-4 py-2.5 bg-slate-50 hover:bg-slate-100 flex-wrap">
         <button onClick={() => setOpenSelf((s) => !s)}
-          className="flex-1 min-w-0 flex items-center gap-2 text-left">
+          className="flex items-center gap-2 text-left shrink-0">
           {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
           <span className="font-mono text-sm font-medium">{groupKey}</span>
           <span className="text-xs text-slate-500">· {tenNL} {chung} · {list.length} chai</span>
         </button>
+        {/* Thời gian thu/Lô chủng luôn giống nhau cho cả lô (sửa 1 ô là áp dụng hết các chai,
+            xem onChange bên dưới) — chuyển lên đây thay vì lặp lại thành 2 cột riêng trong
+            bảng bên dưới cho đỡ tốn chỗ ngang. */}
+        <div className="flex items-center gap-4 text-xs text-slate-500 shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span>Thời gian thu:</span>
+            {roGeneral ? (
+              <span className="text-slate-700">{list[0]?.thoiGianThu ? new Date(list[0].thoiGianThu).toLocaleDateString("vi-VN") : "–"}</span>
+            ) : (
+              <input type="date" value={list[0]?.thoiGianThu || ""}
+                onChange={(e) => { const v = e.target.value || null; list.forEach((x) => onEdit(x.id, "thoiGianThu", v)); }}
+                title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
+                className="text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span>Lô chủng:</span>
+            {roGeneral ? (
+              <span className="text-slate-700">{list[0]?.loChung || "–"}</span>
+            ) : (
+              <EditText v={list[0]?.loChung} commitOnBlur w="w-16"
+                title="Áp dụng cho cả lô — các chai cùng lô luôn chung 1 lô chủng"
+                on={(x) => { list.forEach((row) => onEdit(row.id, "loChung", x)); }} />
+            )}
+          </div>
+        </div>
+        <div className="flex-1" />
         {canRowAction && status === "cho-kqkn" && <AddBottleInline lo={groupKey} onAdd={onAddBottle} />}
       </div>
       {isOpen && (
@@ -1508,7 +1535,7 @@ function MaterialGroupTable({
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-white text-slate-400 border-b border-slate-100 text-left">
               <tr>
-                {["STT","Số lô","Thời gian thu","Lô chủng","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
+                {["STT","Số lô","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
                   h ? <th key={i} className="px-3 py-2 font-medium">{h}</th> : null)}
                 <th className="px-2"></th>
               </tr>
@@ -1533,25 +1560,6 @@ function MaterialGroupTable({
                     className={`border-b border-slate-50 hover:bg-slate-50/60 ${qcRed ? "bg-red-200 hover:bg-red-200" : ""}`}>
                     <td className="px-3 py-1.5 text-slate-400">{r.stt}</td>
                     <td className="px-3 py-1.5 font-mono">{r.soLo || "–"}</td>
-                    {roGeneral ? (
-                      <td className="px-2 py-1 text-slate-600">{r.thoiGianThu ? new Date(r.thoiGianThu).toLocaleDateString("vi-VN") : "–"}</td>
-                    ) : (
-                      <SelectableTd {...cellProps("thoiGianThu")} className="px-2 py-1 text-slate-600">
-                        <input type="date" value={r.thoiGianThu || ""}
-                          onChange={(e)=>{ const v = e.target.value || null; list.forEach((x)=>onEdit(x.id,"thoiGianThu", v)); }}
-                          title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
-                          className="text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
-                      </SelectableTd>
-                    )}
-                    {roGeneral ? (
-                      <td className="px-2 py-1">{r.loChung || "–"}</td>
-                    ) : (
-                      <SelectableTd {...cellProps("loChung")} className="px-2 py-1">
-                        <EditText v={r.loChung} commitOnBlur w="w-16"
-                          title="Áp dụng cho cả lô — các chai cùng lô luôn chung 1 lô chủng"
-                          on={(x)=>{ list.forEach((row)=>onEdit(row.id,"loChung",x)); }} />
-                      </SelectableTd>
-                    )}
                     {roGeneral ? (
                       <td className="px-2 py-1 text-right">{fmt(r.vDich,1)}</td>
                     ) : (
