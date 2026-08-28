@@ -189,6 +189,17 @@ function classify(rec) {
   }
 
   if (reasons.length) return { status: disposed ? "da-huy" : "cho-xu-ly", loai: null, expired, nearExpiry, reasons };
+
+  // Nhiễm khuẩn "Đạt" mới chỉ là 1 vế — MĐ SH và Bào tử % là số liệu định lượng bắt buộc
+  // trước khi cho pha (chốt với NCV 2026-08-28, sau khi phát hiện lô 26H02SA1 nhảy thẳng
+  // "Chờ pha" dù 2 cột này còn trống — trước đây chỉ xét mỗi Nhiễm khuẩn). Giữ ở "Chờ KQKN"
+  // tới khi QC nhập đủ, không chặn ở "Nhiễm khuẩn" (đã Đạt) mà chặn riêng ở 2 cột này.
+  const needsMdSH = rec.mdSH == null;
+  const needsBaoTu = rec.tyLeBaoTu == null;
+  if (needsMdSH || needsBaoTu) {
+    return { status: "cho-kqkn", loai: null, chuaQC: false, nearExpiry, qcDays: daysSinceThu(rec), needsMdSH, needsBaoTu };
+  }
+
   return { status: "cho-pha", loai, nearExpiry };
 }
 const statusOf = (rec) => {
@@ -694,7 +705,7 @@ function Connected({ session, profile }) {
       case "het-han": return !!st.expired;
       case "gan-het-han": return !!st.nearExpiry;
       case "qua-han-qc": return st.status === "cho-kqkn" && st.qcDays != null && st.qcDays >= QC_DEADLINE_DAYS;
-      case "thieu-du-lieu": return !!(st.needsNhiemConNao || st.needsGhiChu || st.chuaQC);
+      case "thieu-du-lieu": return !!(st.needsNhiemConNao || st.needsGhiChu || st.chuaQC || st.needsMdSH || st.needsBaoTu);
       default: return true;
     }
   };
@@ -1577,14 +1588,14 @@ function MaterialGroupTable({
                     {roQcFields ? (
                       <td className="px-2 py-1 text-right">{r.mdSH==null?<span className="text-slate-300">thiếu</span>:fmt(r.mdSH)}</td>
                     ) : (
-                      <SelectableTd {...cellProps("mdSH")} className="px-2 py-1 text-right">
+                      <SelectableTd {...cellProps("mdSH")} className={`px-2 py-1 text-right ${st.needsMdSH?"bg-amber-50":""}`}>
                         <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
                       <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)}</td>
                     ) : (
-                      <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>
+                      <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":st.needsBaoTu?"bg-amber-50":""}`}>
                         <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
                       </SelectableTd>
                     )}
@@ -1654,7 +1665,8 @@ function MaterialGroupTable({
                       ) : status === "cho-kqkn" ? (
                         <div className="flex items-center justify-end gap-2">
                           <ForceStatusSelect soLo={r.soLo} onDaPha={()=>onForceDaPha(r.id)} onChoXuLy={()=>onForceChoXuLy(r.id)} onDaHuy={()=>onForceDaHuy(r.id)} />
-                          <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                          <button onClick={()=>{ if (window.confirm(`Xoá vĩnh viễn số lô ${r.soLo}? Dùng khi bị quét nhầm từ mail Thu bào tử. Không thể hoàn tác.`)) onRemove(r.id); }}
+                            title="Xoá vĩnh viễn (vd: chai bị quét nhầm)" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
                       ) : status === "cho-xoa" ? (
                         <div className="flex items-center justify-end gap-2">
