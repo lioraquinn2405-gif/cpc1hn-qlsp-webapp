@@ -812,10 +812,10 @@ function Connected({ session, profile }) {
 /* ---------------- Sidebar ---------------- */
 function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
   const displayEmail = userEmail;
-  const [nlOpen, setNlOpen] = useState(true);
-  const [phaOpen, setPhaOpen] = useState(true);
-  const [spOpen, setSpOpen] = useState(true);
-  const [lenMenOpen, setLenMenOpen] = useState(true);
+  const [nlOpen, setNlOpen] = useState(false);
+  const [phaOpen, setPhaOpen] = useState(false);
+  const [spOpen, setSpOpen] = useState(false);
+  const [lenMenOpen, setLenMenOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState({});
   const isPhaTab = tab === "pha" || tab === "ke-hoach" || tab === "cho-sx";
   const isNlTab = NL_TABS.some((t) => t.key === tab) || tab === "cho-xoa";
