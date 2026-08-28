@@ -270,6 +270,10 @@ function getOrCreateLabel_(name) {
   return GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
 }
 
+function hasLabel_(thread, labelName) {
+  return thread.getLabels().some(function (l) { return l.getName() === labelName; });
+}
+
 // Logic dùng chung, không phụ thuộc UI — dùng được cả khi chạy tay lẫn từ trigger.
 function runThuBaoTuScan_() {
   var props = PropertiesService.getScriptProperties();
@@ -281,10 +285,19 @@ function runThuBaoTuScan_() {
 
   var doneLabel = getOrCreateLabel_(THU_LABEL_DONE);
   var errorLabel = getOrCreateLabel_(THU_LABEL_ERROR);
-  // Không cần sửa bộ lọc Gmail — vẫn quét đúng nhãn "Thu bào tử" bạn đã đặt sẵn,
-  // chỉ loại ra mail đã có 1 trong 2 nhãn phụ (đã xử lý xong rồi, không quét lại).
+
+  // KHÔNG loại nhãn "Đã quét" ra khỏi tìm kiếm (khác bản cũ) — Gmail chỉ gắn
+  // nhãn được ở cấp CẢ THREAD, không phải từng mail riêng. Nếu 1 thread cũ đã
+  // "Đã quét" mà sau đó có thêm mail GỐC mới (vd NCV gửi lại đúng chủ đề cũ nên
+  // Gmail tự gộp chung 1 thread), loại theo nhãn sẽ bỏ sót mail mới đó mãi mãi.
+  // Thay vào đó, bên dưới tự so số mail gốc đã xử lý lần trước (lưu trong Script
+  // Properties) với số mail gốc hiện có trong thread để biết có gì mới không.
+  // Vẫn loại nhãn "Lỗi" (định dạng lạ, thử lại không tự khác được, cần nhập tay)
+  // và "Báo cáo" (mail do CHÍNH script gửi — chữ "Thu bào tử" trong đó có thể bị
+  // bộ lọc Gmail của bạn tự gắn luôn nhãn "Thu bào tử", khiến script quét nhầm
+  // báo cáo hôm trước thành mail mới rồi báo lỗi lặp lại mỗi ngày).
   var threads = GmailApp.search(
-    'label:"' + THU_LABEL_NAME + '" -label:"' + THU_LABEL_DONE + '" -label:"' + THU_LABEL_ERROR + '"', 0, 50);
+    'label:"' + THU_LABEL_NAME + '" -label:"' + THU_LABEL_ERROR + '" -label:"' + THU_LABEL_REPORT + '"', 0, 50);
 
   var mailCount = 0, bottleCount = 0, skippedReplyOnly = 0, failed = [], details = [];
   threads.forEach(function (thread) {
@@ -298,6 +311,17 @@ function runThuBaoTuScan_() {
         // tạm thời, không cần thử lại).
         errorLabel.addToThread(thread);
         skippedReplyOnly++;
+        return;
+      }
+
+      // Thread đã "Đã quét" từ lần trước VÀ số mail gốc không tăng thêm — không
+      // có gì mới, bỏ qua (tránh quét lại vô ích mỗi ngày). Nếu số mail gốc tăng
+      // (có mail mới thêm vào thread cũ) thì vẫn xử lý tiếp bên dưới dù đã "Đã
+      // quét" — an toàn vì lô đã có sẵn chỉ được cập nhật thời gian thu, không
+      // đụng tới pH/thể tích/kết quả QC đã nhập (xem tryUpdateThoiGianThu_).
+      var countKey = "thuBaoTu_srcCount_" + thread.getId();
+      var lastCount = parseInt(props.getProperty(countKey) || "0", 10);
+      if (hasLabel_(thread, THU_LABEL_DONE) && sourceMessages.length <= lastCount) {
         return;
       }
 
@@ -329,7 +353,8 @@ function runThuBaoTuScan_() {
 
         bottleCount += rows.length;
         mailCount++;
-        doneLabel.addToThread(thread); // thành công — không quét lại nữa
+        doneLabel.addToThread(thread); // thành công
+        props.setProperty(countKey, String(sourceMessages.length)); // nhớ đã xử lý tới đây, chỉ quét lại nếu có thêm mail gốc mới
 
         // Liệt kê chi tiết từng chai (số lô, thể tích, pH) để NCV kiểm tra ngay
         // trên email báo cáo, không cần mở web.
