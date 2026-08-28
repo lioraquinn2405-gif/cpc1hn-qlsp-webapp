@@ -286,6 +286,16 @@ function runThuBaoTuScan_() {
   var doneLabel = getOrCreateLabel_(THU_LABEL_DONE);
   var errorLabel = getOrCreateLabel_(THU_LABEL_ERROR);
 
+  // Dọn nhãn gắn nhầm: mail báo cáo do CHÍNH script gửi (đã có nhãn "Báo cáo")
+  // đôi khi bị bộ lọc Gmail của bạn tự khớp chữ "Thu bào tử" trong nội dung rồi
+  // gắn thêm nhãn chính "Thu bào tử" — gỡ ngay nhãn đó ra (không phải mail thật
+  // nên chắc chắn an toàn khi gỡ), để nhãn "Thu bào tử" chỉ còn đúng mail NCV gửi.
+  var mainLabel = GmailApp.getUserLabelByName(THU_LABEL_NAME);
+  if (mainLabel) {
+    GmailApp.search('label:"' + THU_LABEL_NAME + '" label:"' + THU_LABEL_REPORT + '"', 0, 50)
+      .forEach(function (t) { t.removeLabel(mainLabel); });
+  }
+
   // KHÔNG loại nhãn "Đã quét" ra khỏi tìm kiếm (khác bản cũ) — Gmail chỉ gắn
   // nhãn được ở cấp CẢ THREAD, không phải từng mail riêng. Nếu 1 thread cũ đã
   // "Đã quét" mà sau đó có thêm mail GỐC mới (vd NCV gửi lại đúng chủ đề cũ nên
@@ -314,14 +324,27 @@ function runThuBaoTuScan_() {
         return;
       }
 
-      // Thread đã "Đã quét" từ lần trước VÀ số mail gốc không tăng thêm — không
-      // có gì mới, bỏ qua (tránh quét lại vô ích mỗi ngày). Nếu số mail gốc tăng
-      // (có mail mới thêm vào thread cũ) thì vẫn xử lý tiếp bên dưới dù đã "Đã
-      // quét" — an toàn vì lô đã có sẵn chỉ được cập nhật thời gian thu, không
-      // đụng tới pH/thể tích/kết quả QC đã nhập (xem tryUpdateThoiGianThu_).
       var countKey = "thuBaoTu_srcCount_" + thread.getId();
-      var lastCount = parseInt(props.getProperty(countKey) || "0", 10);
-      if (hasLabel_(thread, THU_LABEL_DONE) && sourceMessages.length <= lastCount) {
+      var storedCount = props.getProperty(countKey);
+      var isDone = hasLabel_(thread, THU_LABEL_DONE);
+
+      // Thread đã "Đã quét" từ TRƯỚC KHI có đoạn code này (chưa từng lưu mốc số
+      // mail gốc) — coi số mail gốc hiện có là đã xử lý xong hết rồi (đúng nghĩa
+      // nhãn "Đã quét" lúc đó), CHỈ ghi nhận mốc để lần sau so sánh, KHÔNG quét
+      // lại. Thiếu dòng này thì lần chạy đầu tiên sau khi cập nhật code sẽ hiểu
+      // lầm mọi thread cũ đều "0 mail đã xử lý" rồi quét lại toàn bộ 1 lượt.
+      if (isDone && storedCount == null) {
+        props.setProperty(countKey, String(sourceMessages.length));
+        return;
+      }
+
+      // Thread đã "Đã quét" VÀ số mail gốc không tăng thêm — không có gì mới, bỏ
+      // qua (tránh quét lại vô ích mỗi ngày). Nếu số mail gốc tăng (có mail mới
+      // thêm vào thread cũ) thì vẫn xử lý tiếp bên dưới dù đã "Đã quét" — an toàn
+      // vì lô đã có sẵn chỉ được cập nhật thời gian thu, không đụng tới pH/thể
+      // tích/kết quả QC đã nhập (xem tryUpdateThoiGianThu_).
+      var lastCount = parseInt(storedCount || "0", 10);
+      if (isDone && sourceMessages.length <= lastCount) {
         return;
       }
 
