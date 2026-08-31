@@ -1190,11 +1190,20 @@ function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur, title })
   // commitOnBlur: chỉ lưu (và do đó chỉ kích hoạt phân loại lại trạng thái, vd nhảy sang
   // "Chờ xử lý") lúc rời khỏi ô — không lưu theo từng ký tự như mặc định, tránh dòng bị
   // chuyển tab ngay giữa lúc còn đang gõ dở (vd Ghi chú bắt buộc trước khi chuyển Chờ xử lý).
+  //
+  // Bug "nhảy chữ" (giống bug "nhảy số" đã vá ở EditNum): chế độ mặc định (không
+  // commitOnBlur) lưu lên Supabase theo từng ký tự — mỗi lần lưu kích hoạt Realtime
+  // (subscribeMaterials) tải lại TOÀN BỘ bảng. Nếu ô input bind thẳng vào v (dữ liệu
+  // server) thay vì state riêng, dữ liệu tải lại về trễ/lệch nhịp lúc đang gõ nhanh sẽ
+  // ghi đè lùi lại chữ vừa gõ. Luôn hiển thị từ state `text` riêng, chỉ đồng bộ lại từ
+  // v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi rời ô/dữ liệu ổn định).
   const [text, setText] = useState(v ?? "");
-  useEffect(() => { setText(v ?? ""); }, [v]);
-  return <input value={commitOnBlur ? text : (v ?? "")} placeholder={ph} disabled={disabled} title={title}
-    onChange={(e) => { const val = e.target.value; commitOnBlur ? setText(val) : on(val); }}
-    onBlur={commitOnBlur ? () => on(text) : undefined}
+  const focusedRef = useRef(false);
+  useEffect(() => { if (!focusedRef.current) setText(v ?? ""); }, [v]);
+  return <input value={text} placeholder={ph} disabled={disabled} title={title}
+    onFocus={() => { focusedRef.current = true; }}
+    onChange={(e) => { const val = e.target.value; setText(val); if (!commitOnBlur) on(val); }}
+    onBlur={() => { focusedRef.current = false; if (commitOnBlur) on(text); }}
     className={`${w} text-xs border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-slate-50 disabled:text-slate-400 ${err ? "border-rose-400 bg-rose-50" : "border-slate-200"}`} />;
 }
 function EditNum({ v, on, w = "w-16" }) {
