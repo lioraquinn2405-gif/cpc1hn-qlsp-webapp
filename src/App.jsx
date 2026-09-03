@@ -4,7 +4,7 @@ import {
   Plus, Trash2, ChevronRight, ChevronDown, ChevronUp, Droplets, Loader2, Ban, LogOut, X, RotateCcw,
   Calculator, XCircle, HelpCircle, Settings, Mail, KeyRound, GripVertical, Factory, Sparkles, Menu,
   Search,
-  ShieldAlert, Snowflake,
+  ShieldAlert, Snowflake, Copy,
 } from "lucide-react";
 import LenMenPanel from "./LenMenPanel.jsx";
 import SeedLotPanel from "./SeedLotPanel.jsx";
@@ -15,7 +15,7 @@ import {
   removeProduct, subscribeMaterials, reorderProducts,
 } from "./lib/materialsApi.js";
 import { fetchProfile, fetchProfiles, updateProfile, setUserEmail, requestEmailChange, signUp, adminCreateUser } from "./lib/profilesApi.js";
-import { parseDotSanXuat, parseSoLoDate, productionDate } from "./lib/materialsQc.js";
+import { parseDotSanXuat, parseSoLoDate, productionDate, monthLabelVN } from "./lib/materialsQc.js";
 import { planSingleComponent, planTwoComponent, TANK_MAX_L, MAX_LOTS_PER_BATCH, MAX_CLOSING_OVERSHOOT } from "./lib/mixPlanner.js";
 import { fetchMixPlans, fetchMixPlansByIds, saveMixPlanDecision, saveEditedMixPlanDecision, removeMixPlan, reviewMixPlanWithAi } from "./lib/mixPlansApi.js";
 import { fetchFinishedBatches, createFinishedBatch, updateFinishedBatchField } from "./lib/finishedBatchesApi.js";
@@ -794,6 +794,7 @@ function Connected({ session, profile }) {
                       dateFrom={dateFrom} setDateFrom={setDateFrom} dateTo={dateTo} setDateTo={setDateTo}
                       hasActiveFilter={hasActiveFilter} onReset={resetFilters}
                       resultCount={rows.length} />
+                    {tab === "cho-xu-ly" && <ChoXuLyMonthlyReport rows={rows} setNote={setNote} />}
                     <MaterialTable rows={rows} status={tab} onEdit={editField} onRemove={removeRec}
                       onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
                       canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
@@ -1708,6 +1709,114 @@ function MaterialGroupTable({
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+const STRAIN_SHORT_LABEL = { subtilis: "B. subtilis", clausii: "B. clausii" };
+const CHO_XU_LY_REPORT_HEADERS = ["Số lô", "Nguyên liệu", "Chủng", "Thời gian thu", "Lý do", "Ghi chú"];
+
+// Gộp danh sách NL "Chờ xử lý" (dù nhiễm khuẩn không đạt, hết hạn dùng, hay chuyển tay) theo
+// THÁNG SẢN XUẤT (productionDate, suy từ số lô — khớp cách "Xu hướng NL" đang tính, luôn có sẵn
+// không phụ thuộc NCV đã nhập thời gian thu hay chưa) — để NCV/QC báo cáo nhanh mỗi tháng có bao
+// nhiêu chai không đạt mà không phải tự đếm tay trong bảng dài. Copy theo tháng hoặc copy hết 1
+// lượt (kèm cột Tháng) để dán thẳng vào mail — copy cả text/html (bảng thật khi dán vào Gmail) lẫn
+// text/plain (dán được cả vào nơi không hiện HTML), theo đúng cách copyTable() ở MixPlanPanel.
+function ChoXuLyMonthlyReport({ rows, setNote }) {
+  const [openMonth, setOpenMonth] = useState(null);
+
+  const byMonth = useMemo(() => {
+    const map = new Map();
+    for (const r of rows) {
+      const pd = productionDate(r);
+      const mk = pd ? `${pd.getFullYear()}-${String(pd.getMonth() + 1).padStart(2, "0")}` : "?";
+      if (!map.has(mk)) map.set(mk, []);
+      map.get(mk).push(r);
+    }
+    return [...map.entries()].sort(([a], [b]) => (a === "?" ? 1 : b === "?" ? -1 : b.localeCompare(a)));
+  }, [rows]);
+
+  const monthLabel = (mk) => (mk === "?" ? "Không rõ tháng SX" : monthLabelVN(mk));
+  const rowCells = (r) => [
+    r.soLo || "", r.tenNL || "", STRAIN_SHORT_LABEL[r.strain] || "",
+    r.thoiGianThu ? new Date(r.thoiGianThu).toLocaleDateString("vi-VN") : "",
+    (statusOf(r).reasons || []).join(" · "), r.ghiChu || "",
+  ];
+
+  const doCopy = async (label, headers, dataRows) => {
+    const text = [label, headers.join("\t"), ...dataRows.map((row) => row.join("\t"))].join("\n");
+    const html = `<p><b>${label}</b></p><table border="1" cellspacing="0" cellpadding="4">` +
+      `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>` +
+      `<tbody>${dataRows.map((row) => `<tr>${row.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) }),
+      ]);
+      setNote(`Đã copy bảng ${label.toLowerCase()} — dán vào Gmail.`);
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        setNote(`Đã copy bảng ${label.toLowerCase()} (dạng text) — dán vào Gmail.`);
+      } catch (err) {
+        setNote(`Không copy được: ${err.message}`);
+      }
+    }
+  };
+
+  const copyMonth = (mk, items) => doCopy(monthLabel(mk), CHO_XU_LY_REPORT_HEADERS, items.map(rowCells));
+  const copyAll = () => doCopy(
+    "Toàn bộ NL chờ xử lý",
+    ["Tháng", ...CHO_XU_LY_REPORT_HEADERS],
+    byMonth.flatMap(([mk, items]) => items.map((r) => [monthLabel(mk), ...rowCells(r)])),
+  );
+
+  if (!rows.length) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 overflow-hidden mb-3">
+      <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+        <span className="font-medium text-sm">Thống kê theo tháng ({rows.length} chai)</span>
+        <button onClick={copyAll} className="flex items-center gap-1 text-xs text-sky-700 hover:underline">
+          <Copy className="w-3.5 h-3.5" /> Copy toàn bộ (mọi tháng)
+        </button>
+      </div>
+      <table className="w-full text-xs">
+        <tbody>
+          {byMonth.map(([mk, items]) => (
+            <React.Fragment key={mk}>
+              <tr className="border-b border-slate-50 hover:bg-slate-50/60 cursor-pointer" onClick={() => setOpenMonth(openMonth === mk ? null : mk)}>
+                <td className="px-3 py-2 text-slate-400 w-8">{openMonth === mk ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</td>
+                <td className="px-3 py-2 font-medium">{monthLabel(mk)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{items.length} chai</td>
+                <td className="px-3 py-2 text-right">
+                  <button onClick={(e) => { e.stopPropagation(); copyMonth(mk, items); }}
+                    className="flex items-center gap-1 text-sky-700 hover:underline ml-auto">
+                    <Copy className="w-3.5 h-3.5" /> Copy
+                  </button>
+                </td>
+              </tr>
+              {openMonth === mk && (
+                <tr>
+                  <td colSpan={4} className="px-3 pb-3">
+                    <table className="w-full text-xs border border-slate-100 rounded overflow-hidden">
+                      <thead className="bg-slate-50 text-slate-500">
+                        <tr>{CHO_XU_LY_REPORT_HEADERS.map((h) => <th key={h} className="px-2 py-1.5 text-left font-medium">{h}</th>)}</tr>
+                      </thead>
+                      <tbody>
+                        {items.map((r) => (
+                          <tr key={r.id} className="border-t border-slate-100">
+                            {rowCells(r).map((c, i) => <td key={i} className="px-2 py-1.5 whitespace-normal">{c || "–"}</td>)}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
