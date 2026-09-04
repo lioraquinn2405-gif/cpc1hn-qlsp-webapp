@@ -1228,6 +1228,37 @@ const groupNum = (n) => (n == null || n === "" ? "" : Number(n).toLocaleString("
 // gì), input chỉ hiện bản có chấm; gõ ký tự nào không phải số thì tự bỏ qua luôn.
 const digitsOnly = (s) => String(s || "").replace(/\D/g, "");
 const groupIntStr = (s) => { const d = digitsOnly(s); return d ? Number(d).toLocaleString("vi-VN") : ""; };
+// Ô số nguyên có chấm hàng nghìn nhưng vẫn sửa được đúng kiểu bình thường (xoá 1 chữ số giữa
+// chuỗi rồi gõ số khác vào đúng chỗ đó, không bị bật con trỏ về cuối) — value là chuỗi số thô
+// (không dấu chấm, giữ nguyên cho chỗ khác dùng num()/parseInt), onChange trả về số thô mới.
+// Cách làm: đếm xem trước vị trí con trỏ có bao nhiêu CHỮ SỐ (bỏ qua dấu chấm) ngay sau khi
+// trình duyệt đã áp thao tác sửa, format lại toàn chuỗi, rồi đặt lại con trỏ ngay sau đúng số
+// chữ số đó trong chuỗi mới — ghi thẳng vào DOM (el.value/setSelectionRange) TRƯỚC khi gọi
+// onChange (kích hoạt re-render từ state cha) để khỏi bị nháy/giật lúc React vẽ lại.
+function GroupedIntInput({ value, onChange, placeholder, className }) {
+  const handleChange = (e) => {
+    const el = e.target;
+    const raw = el.value;
+    const caret = el.selectionStart ?? raw.length;
+    const digitsBeforeCaret = (raw.slice(0, caret).match(/\d/g) || []).length;
+    const digits = digitsOnly(raw);
+    const formatted = digits ? Number(digits).toLocaleString("vi-VN") : "";
+    let pos = formatted.length;
+    if (digitsBeforeCaret === 0) {
+      pos = 0;
+    } else {
+      let count = 0;
+      for (let i = 0; i < formatted.length; i++) {
+        if (/\d/.test(formatted[i])) count++;
+        if (count === digitsBeforeCaret) { pos = i + 1; break; }
+      }
+    }
+    el.value = formatted;
+    el.setSelectionRange(pos, pos);
+    onChange(digits);
+  };
+  return <input value={groupIntStr(value)} onChange={handleChange} placeholder={placeholder} inputMode="numeric" className={className} />;
+}
 function EditNum({ v, on, w = "w-16" }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
@@ -3124,7 +3155,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           </div>
           <div>
             <label className="text-xs text-slate-500">Số ống cần cho nhịp này</label>
-            <input value={groupIntStr(nInput)} onChange={(e) => setNInput(digitsOnly(e.target.value))} placeholder="vd 120.000"
+            <GroupedIntInput value={nInput} onChange={setNInput} placeholder="vd 120.000"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-40" />
           </div>
           <div>
