@@ -2721,7 +2721,10 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   // nhau.
   const presenceLabel = userLabel ? `${userLabel} (${role})` : null;
   const others = usePresence(role === "rd" && sp ? `ke-hoach-rd:${sp.maSP}` : null, actorId, presenceLabel);
-  const [nInput, setNInput] = useState(sp?.soOngNhip ? String(sp.soOngNhip) : "");
+  // Số ống cần cho nhịp này KHÔNG tự điền theo mặc định của sản phẩm (khác Hàm lượng đích) —
+  // giá trị này đổi theo từng nhịp pha thực tế, tự điền sẵn chỉ khiến NCV phải xoá đi trước
+  // khi gõ số thật (chốt với NCV 2026-09).
+  const [nInput, setNInput] = useState("");
   const [gInput, setGInput] = useState(sp?.hamLuong ? String(sp.hamLuong) : "");
   const [gInput2, setGInput2] = useState(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
   // "Pha tròn chai NL" — chỉ áp dụng SP 1 thành phần (chốt NCV 2026-08-10): mỗi lô = đúng 1 mẻ
@@ -2754,7 +2757,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   const [aiError, setAiError] = useState("");
 
   useEffect(() => {
-    setNInput(sp?.soOngNhip ? String(sp.soOngNhip) : "");
+    setNInput("");
     setGInput(sp?.hamLuong ? String(sp.hamLuong) : "");
     setGInput2(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
     setWholeBottleOnly(false);
