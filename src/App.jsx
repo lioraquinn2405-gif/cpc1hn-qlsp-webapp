@@ -1208,22 +1208,26 @@ function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur, title })
     onBlur={() => { focusedRef.current = false; if (commitOnBlur) on(text); }}
     className={`${w} text-xs border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-slate-50 disabled:text-slate-400 ${err ? "border-rose-400 bg-rose-50" : "border-slate-200"}`} />;
 }
+// Số lớn (vd MĐ SH cỡ chục triệu) khó đọc nếu để trần — lúc KHÔNG focus hiện có dấu chấm
+// ngăn cách hàng nghìn kiểu vi-VN (vd 10000000 -> "10.000.000"), lúc bấm vào gõ thì trả về
+// số thô (không dấu chấm) để không vướng lúc gõ/xoá.
+const groupNum = (n) => (n == null || n === "" ? "" : Number(n).toLocaleString("vi-VN", { maximumFractionDigits: 6 }));
 function EditNum({ v, on, w = "w-16" }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
   // không gõ tiếp được số thập phân.
-  const [text, setText] = useState(v ?? "");
+  const [text, setText] = useState(groupNum(v));
   // Bug "nhảy số": mỗi lần gõ xong 1 ký tự hợp lệ (vd "8,") đã gọi on() lưu tạm lên Supabase,
   // Realtime lập tức phản hồi lại giá trị đã lưu (vd "8", mất phần thập phân đang gõ dở) qua
   // prop v — nếu vẫn đồng bộ lại lúc đang gõ thì mất luôn phần vừa nhập, gõ tiếp bị sai số.
   // Chỉ đồng bộ lại từ v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi blur).
   const focusedRef = useRef(false);
-  useEffect(() => { if (!focusedRef.current) setText(v ?? ""); }, [v]);
+  useEffect(() => { if (!focusedRef.current) setText(groupNum(v)); }, [v]);
   return (
     <input
       value={text}
       inputMode="decimal"
-      onFocus={() => { focusedRef.current = true; }}
+      onFocus={() => { focusedRef.current = true; setText(v ?? ""); }}
       onChange={(e) => {
         const raw = e.target.value;
         setText(raw);
@@ -1231,7 +1235,7 @@ function EditNum({ v, on, w = "w-16" }) {
         const n = num(raw);
         if (n != null) on(n);
       }}
-      onBlur={() => { focusedRef.current = false; setText(v ?? ""); }}
+      onBlur={() => { focusedRef.current = false; setText(groupNum(v)); }}
       className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 text-right focus:outline-none focus:ring-1 focus:ring-emerald-400`}
     />
   );
