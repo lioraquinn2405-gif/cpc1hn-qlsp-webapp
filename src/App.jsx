@@ -65,6 +65,14 @@ const num = (s) => {
 const fmt = (v, d = 2) => (v == null || !Number.isFinite(v) ? "–"
   : v.toLocaleString("vi-VN", { minimumFractionDigits: d, maximumFractionDigits: d }));
 const sci = (v) => (v == null ? "–" : Number(v).toExponential(2).replace("e+", "×10^"));
+// Dạng gọn cho ô đang gõ tự do (vd Hàm lượng đích, chấp nhận cả "4e8") — phẩy thập phân kiểu
+// vi-VN + bỏ số 0 thừa ở cuối (4,2×10^8 thay vì 4,20×10^8), khác sci() ở trên (luôn giữ đúng 2
+// chữ số thập phân, dùng cho bảng số liệu cần thẳng hàng).
+const sciVN = (v) => {
+  if (v == null || !Number.isFinite(Number(v)) || Number(v) === 0) return "";
+  const [mStr, eStr] = Number(v).toExponential(2).split("e");
+  return `${parseFloat(mStr).toString().replace(".", ",")}×10^${parseInt(eStr, 10)}`;
+};
 
 // Đăng nhập cho phép gõ email THẬT hoặc SỐ ĐIỆN THOẠI — dùng thẳng 2 trường độc lập
 // (email/phone) mà Supabase Auth hỗ trợ sẵn, KHÔNG còn quy đổi SĐT thành email giả nữa
@@ -3117,12 +3125,16 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
             <label className="text-xs text-slate-500">Hàm lượng đích{sp.pool2 ? ` – ${POOL_LABEL[sp.pool]}` : ""} (cfu/ml)</label>
             <input value={gInput} onChange={(e) => setGInput(e.target.value)} placeholder="vd 4e8"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
+            {/* Ô cho gõ tự do (kể cả dạng khoa học "4e8") nên không chấm hàng nghìn được — hiện
+                thêm dòng đọc-hiểu dạng 4,2×10^8 ngay dưới, cập nhật live theo giá trị đang gõ. */}
+            {sciVN(num(gInput)) && <div className="mt-1 text-[11px] text-slate-400">{sciVN(num(gInput))}</div>}
           </div>
           {sp.pool2 && (
             <div>
               <label className="text-xs text-slate-500">Hàm lượng đích – {POOL_LABEL[sp.pool2]} (cfu/ml)</label>
               <input value={gInput2} onChange={(e) => setGInput2(e.target.value)} placeholder="vd 4e8"
                 className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
+              {sciVN(num(gInput2)) && <div className="mt-1 text-[11px] text-slate-400">{sciVN(num(gInput2))}</div>}
             </div>
           )}
           {!sp.pool2 && (
