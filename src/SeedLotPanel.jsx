@@ -17,6 +17,7 @@ import {
   DIEU_KIEN_LUU_LABEL, STABILITY_CRITERIA, MOVEMENT_LABEL, MUC_DICH_XUAT, MUC_DICH_LABEL,
 } from "./lib/seedLotsApi.js";
 import SeedLabelModal from "./SeedLabel.jsx";
+import DateInputVN from "./DateInputVN.jsx";
 import { openPhieuPrint, renderPhieuHTML, renderSoLoHistoryHTML, printKiemKe, tenLoaiCuaLo, NGUOI_THUC_HIEN_LABEL } from "./SeedIssueForm.jsx";
 import SeedReport from "./SeedReport.jsx";
 import SeedStabilityChart from "./SeedStabilityChart.jsx";
@@ -117,7 +118,7 @@ function AddLotForm({ onAdd }) {
       <div><label className="text-xs text-slate-500">Số ống nhập</label>
         <input inputMode="numeric" value={form.soOng} onChange={set("soOng")} className={`block mt-1 ${inputCls} w-24 text-right`} /></div>
       <div><label className="text-xs text-slate-500">Ngày sản xuất</label>
-        <input type="date" value={form.ngaySanXuat} onChange={set("ngaySanXuat")} className={`block mt-1 ${inputCls}`} /></div>
+        <DateInputVN value={form.ngaySanXuat} onChange={set("ngaySanXuat")} className={`block mt-1 ${inputCls}`} /></div>
       <div><label className="text-xs text-slate-500">Nguồn gốc</label>
         <input value={form.nguonGoc} onChange={set("nguonGoc")} placeholder="2200122.C3" className={`block mt-1 ${inputCls} w-36`} /></div>
       <div><label className="text-xs text-slate-500">Mật độ (10⁹ CFU/ml)</label>
@@ -243,7 +244,7 @@ function MovementModal({ lot, loai, fallbackTen, people = { thucHien: [], kiemTr
               <input required inputMode="numeric" min="1" value={form.soOng} onChange={set("soOng")}
                 className={`block mt-1 ${inputCls} w-28 text-right`} /></div>
             <div><label className="text-xs text-slate-500">Ngày</label>
-              <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+              <DateInputVN value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
           </div>
           {laXuat ? (
             <>
@@ -370,7 +371,7 @@ function ExportRequestModal({ lot, actorId, people = { thucHien: [] }, onNewPeop
               <input required inputMode="numeric" min="1" value={form.soOng} onChange={set("soOng")}
                 className={`block mt-1 ${inputCls} w-28 text-right`} /></div>
             <div><label className="text-xs text-slate-500">Ngày xuất</label>
-              <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+              <DateInputVN value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
           </div>
           <div>
             <label className="text-xs text-slate-500">Mục đích xuất *</label>
@@ -455,7 +456,7 @@ function EditMovementModal({ move, lot, people = { thucHien: [], kiemTra: [], ph
           </div>
           <div>
             <label className="text-xs text-slate-500">Ngày</label>
-            <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} />
+            <DateInputVN value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} />
           </div>
           {laXuat ? (
             <>
@@ -695,12 +696,12 @@ function HuyModal({ lots, onClose, onDone }) {
                   className={`block mt-1 ${inputCls} w-28 text-right`} />
                 <p className="text-[11px] text-slate-400 mt-0.5">Đang tồn {lots[0].soOng ?? 0}</p></div>
               <div><label className="text-xs text-slate-500">Ngày huỷ</label>
-                <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+                <DateInputVN value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
             </div>
           )}
           {isBulk && (
             <div><label className="text-xs text-slate-500">Ngày huỷ</label>
-              <input type="date" value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
+              <DateInputVN value={form.ngay} onChange={set("ngay")} className={`block mt-1 ${inputCls}`} /></div>
           )}
           <div>
             <label className="text-xs text-slate-500">Lý do huỷ *</label>
@@ -1149,11 +1150,11 @@ export default function SeedLotPanel({ isAdmin, isQC, canXuatChung, actorId, pro
         </div>
         <div>
           <label className="text-xs text-slate-500">NSX từ</label>
-          <input type="date" value={tuNgay} onChange={(e) => setTuNgay(e.target.value)} className={`block mt-1 ${inputCls}`} />
+          <DateInputVN value={tuNgay} onChange={(e) => setTuNgay(e.target.value)} className={`block mt-1 ${inputCls}`} />
         </div>
         <div>
           <label className="text-xs text-slate-500">đến</label>
-          <input type="date" value={denNgay} onChange={(e) => setDenNgay(e.target.value)} className={`block mt-1 ${inputCls}`} />
+          <DateInputVN value={denNgay} onChange={(e) => setDenNgay(e.target.value)} className={`block mt-1 ${inputCls}`} />
         </div>
         <div>
           <label className="text-xs text-slate-500">Trạng thái</label>

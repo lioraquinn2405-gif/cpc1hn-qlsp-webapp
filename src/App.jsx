@@ -4,10 +4,11 @@ import {
   Plus, Trash2, ChevronRight, ChevronDown, ChevronUp, Droplets, Loader2, Ban, LogOut, X, RotateCcw,
   Calculator, XCircle, HelpCircle, Settings, Mail, KeyRound, GripVertical, Factory, Sparkles, Menu,
   Search,
-  ShieldAlert, Snowflake,
+  ShieldAlert, Snowflake, Copy,
 } from "lucide-react";
 import LenMenPanel from "./LenMenPanel.jsx";
 import SeedLotPanel from "./SeedLotPanel.jsx";
+import DateInputVN from "./DateInputVN.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabaseClient.js";
 import {
   fetchMaterials, fetchProducts, updateMaterialField, updateMaterialFields, removeMaterial,
@@ -15,7 +16,7 @@ import {
   removeProduct, subscribeMaterials, reorderProducts,
 } from "./lib/materialsApi.js";
 import { fetchProfile, fetchProfiles, updateProfile, setUserEmail, requestEmailChange, signUp, adminCreateUser } from "./lib/profilesApi.js";
-import { parseDotSanXuat, parseSoLoDate, productionDate } from "./lib/materialsQc.js";
+import { parseDotSanXuat, parseSoLoDate, productionDate, monthLabelVN } from "./lib/materialsQc.js";
 import { planSingleComponent, planTwoComponent, TANK_MAX_L, MAX_LOTS_PER_BATCH, MAX_CLOSING_OVERSHOOT } from "./lib/mixPlanner.js";
 import { fetchMixPlans, fetchMixPlansByIds, saveMixPlanDecision, saveEditedMixPlanDecision, removeMixPlan, reviewMixPlanWithAi } from "./lib/mixPlansApi.js";
 import { fetchFinishedBatches, createFinishedBatch, updateFinishedBatchField } from "./lib/finishedBatchesApi.js";
@@ -64,6 +65,17 @@ const num = (s) => {
 const fmt = (v, d = 2) => (v == null || !Number.isFinite(v) ? "–"
   : v.toLocaleString("vi-VN", { minimumFractionDigits: d, maximumFractionDigits: d }));
 const sci = (v) => (v == null ? "–" : Number(v).toExponential(2).replace("e+", "×10^"));
+const SUP_DIGITS = { "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻" };
+const toSup = (s) => String(s).split("").map((c) => SUP_DIGITS[c] ?? c).join("");
+// Dạng gọn cho ô đang gõ tự do (vd Hàm lượng đích, chấp nhận cả "4e8") — phẩy thập phân kiểu
+// vi-VN, số mũ viết kiểu chữ nhỏ bên trên (10⁸, không phải 10^8) + bỏ số 0 thừa ở cuối (4,2×10⁸
+// thay vì 4,20×10⁸), khác sci() ở trên (luôn giữ đúng 2 chữ số thập phân + ký hiệu ^, dùng cho
+// bảng số liệu cần thẳng hàng).
+const sciVN = (v) => {
+  if (v == null || !Number.isFinite(Number(v)) || Number(v) === 0) return "";
+  const [mStr, eStr] = Number(v).toExponential(2).split("e");
+  return `${parseFloat(mStr).toString().replace(".", ",")}×10${toSup(parseInt(eStr, 10))}`;
+};
 
 // Đăng nhập cho phép gõ email THẬT hoặc SỐ ĐIỆN THOẠI — dùng thẳng 2 trường độc lập
 // (email/phone) mà Supabase Auth hỗ trợ sẵn, KHÔNG còn quy đổi SĐT thành email giả nữa
@@ -794,6 +806,7 @@ function Connected({ session, profile }) {
                       dateFrom={dateFrom} setDateFrom={setDateFrom} dateTo={dateTo} setDateTo={setDateTo}
                       hasActiveFilter={hasActiveFilter} onReset={resetFilters}
                       resultCount={rows.length} />
+                    {tab === "cho-xu-ly" && <ChoXuLyMonthlyReport rows={rows} setNote={setNote} />}
                     <MaterialTable rows={rows} status={tab} onEdit={editField} onRemove={removeRec}
                       onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
                       canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
@@ -1190,29 +1203,47 @@ function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur, title })
   // commitOnBlur: chỉ lưu (và do đó chỉ kích hoạt phân loại lại trạng thái, vd nhảy sang
   // "Chờ xử lý") lúc rời khỏi ô — không lưu theo từng ký tự như mặc định, tránh dòng bị
   // chuyển tab ngay giữa lúc còn đang gõ dở (vd Ghi chú bắt buộc trước khi chuyển Chờ xử lý).
+  //
+  // Bug "nhảy chữ" (giống bug "nhảy số" đã vá ở EditNum): chế độ mặc định (không
+  // commitOnBlur) lưu lên Supabase theo từng ký tự — mỗi lần lưu kích hoạt Realtime
+  // (subscribeMaterials) tải lại TOÀN BỘ bảng. Nếu ô input bind thẳng vào v (dữ liệu
+  // server) thay vì state riêng, dữ liệu tải lại về trễ/lệch nhịp lúc đang gõ nhanh sẽ
+  // ghi đè lùi lại chữ vừa gõ. Luôn hiển thị từ state `text` riêng, chỉ đồng bộ lại từ
+  // v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi rời ô/dữ liệu ổn định).
   const [text, setText] = useState(v ?? "");
-  useEffect(() => { setText(v ?? ""); }, [v]);
-  return <input value={commitOnBlur ? text : (v ?? "")} placeholder={ph} disabled={disabled} title={title}
-    onChange={(e) => { const val = e.target.value; commitOnBlur ? setText(val) : on(val); }}
-    onBlur={commitOnBlur ? () => on(text) : undefined}
+  const focusedRef = useRef(false);
+  useEffect(() => { if (!focusedRef.current) setText(v ?? ""); }, [v]);
+  return <input value={text} placeholder={ph} disabled={disabled} title={title}
+    onFocus={() => { focusedRef.current = true; }}
+    onChange={(e) => { const val = e.target.value; setText(val); if (!commitOnBlur) on(val); }}
+    onBlur={() => { focusedRef.current = false; if (commitOnBlur) on(text); }}
     className={`${w} text-xs border rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:bg-slate-50 disabled:text-slate-400 ${err ? "border-rose-400 bg-rose-50" : "border-slate-200"}`} />;
 }
+// Số lớn (vd MĐ SH cỡ chục triệu) khó đọc nếu để trần — lúc KHÔNG focus hiện có dấu chấm
+// ngăn cách hàng nghìn kiểu vi-VN (vd 10000000 -> "10.000.000"), lúc bấm vào gõ thì trả về
+// số thô (không dấu chấm) để không vướng lúc gõ/xoá.
+const groupNum = (n) => (n == null || n === "" ? "" : Number(n).toLocaleString("vi-VN", { maximumFractionDigits: 6 }));
+// Ô nhập số nguyên (vd Số ống) cần chấm ngay LÚC ĐANG GÕ (khác EditNum chỉ chấm lúc blur) —
+// state vẫn giữ nguyên chuỗi số thô không dấu chấm (chỗ khác đang parse bằng num() không đổi
+// gì), input chỉ hiện bản có chấm; gõ ký tự nào không phải số thì tự bỏ qua luôn.
+const digitsOnly = (s) => String(s || "").replace(/\D/g, "");
+const groupIntStr = (s) => { const d = digitsOnly(s); return d ? Number(d).toLocaleString("vi-VN") : ""; };
 function EditNum({ v, on, w = "w-16" }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
   // không gõ tiếp được số thập phân.
-  const [text, setText] = useState(v ?? "");
+  const [text, setText] = useState(groupNum(v));
   // Bug "nhảy số": mỗi lần gõ xong 1 ký tự hợp lệ (vd "8,") đã gọi on() lưu tạm lên Supabase,
   // Realtime lập tức phản hồi lại giá trị đã lưu (vd "8", mất phần thập phân đang gõ dở) qua
   // prop v — nếu vẫn đồng bộ lại lúc đang gõ thì mất luôn phần vừa nhập, gõ tiếp bị sai số.
   // Chỉ đồng bộ lại từ v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi blur).
   const focusedRef = useRef(false);
-  useEffect(() => { if (!focusedRef.current) setText(v ?? ""); }, [v]);
+  useEffect(() => { if (!focusedRef.current) setText(groupNum(v)); }, [v]);
   return (
     <input
       value={text}
       inputMode="decimal"
-      onFocus={() => { focusedRef.current = true; }}
+      onFocus={() => { focusedRef.current = true; setText(v ?? ""); }}
       onChange={(e) => {
         const raw = e.target.value;
         setText(raw);
@@ -1220,7 +1251,7 @@ function EditNum({ v, on, w = "w-16" }) {
         const n = num(raw);
         if (n != null) on(n);
       }}
-      onBlur={() => { focusedRef.current = false; setText(v ?? ""); }}
+      onBlur={() => { focusedRef.current = false; setText(groupNum(v)); }}
       className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 text-right focus:outline-none focus:ring-1 focus:ring-emerald-400`}
     />
   );
@@ -1268,13 +1299,23 @@ function NLFilterBar({ loQuery, setLoQuery, statusTagFilter, setStatusTagFilter,
       </div>
       <div className="flex flex-col gap-1">
         <label className="text-slate-500">Từ</label>
-        <input type={dateInputType} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        {dateInputType === "date" ? (
+          <DateInputVN value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        ) : (
+          <input type="month" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        )}
       </div>
       <div className="flex flex-col gap-1">
         <label className="text-slate-500">Đến</label>
-        <input type={dateInputType} value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        {dateInputType === "date" ? (
+          <DateInputVN value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        ) : (
+          <input type="month" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        )}
       </div>
       {hasActiveFilter && (
         <button onClick={onReset} className="flex items-center gap-1 text-slate-500 hover:text-rose-600 py-1.5">
@@ -1352,8 +1393,8 @@ function MaterialGroupTable({
   // JSX bên dưới — không tạo luật quyền mới.
   const EDITABLE_COLUMNS = useMemo(() => {
     const cols = [];
-    if (!roGeneral) cols.push({ key: "thoiGianThu", type: "date" });
-    if (!roGeneral) cols.push({ key: "loChung", type: "text" });
+    // Thời gian thu/Lô chủng KHÔNG nằm trong lưới chọn/copy/dán nữa — đã chuyển lên sửa
+    // 1 lần ở thanh tiêu đề nhóm (áp dụng luôn cho cả lô), không còn là cột riêng của bảng.
     if (!roGeneral) cols.push({ key: "vDich", type: "number" });
     if (!roQcFields) cols.push({ key: "camQuan", type: "text" });
     if (!roQcFields) cols.push({ key: "pH", type: "number" });
@@ -1494,13 +1535,40 @@ function MaterialGroupTable({
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-      <div className="w-full flex items-center gap-2 px-4 py-2.5 bg-slate-50 hover:bg-slate-100">
+      <div className="w-full flex items-center gap-3 px-4 py-2.5 bg-slate-50 hover:bg-slate-100 flex-wrap">
         <button onClick={() => setOpenSelf((s) => !s)}
-          className="flex-1 min-w-0 flex items-center gap-2 text-left">
+          className="flex items-center gap-2 text-left shrink-0">
           {isOpen ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
           <span className="font-mono text-sm font-medium">{groupKey}</span>
           <span className="text-xs text-slate-500">· {tenNL} {chung} · {list.length} chai</span>
         </button>
+        {/* Thời gian thu/Lô chủng luôn giống nhau cho cả lô (sửa 1 ô là áp dụng hết các chai,
+            xem onChange bên dưới) — chuyển lên đây thay vì lặp lại thành 2 cột riêng trong
+            bảng bên dưới cho đỡ tốn chỗ ngang. */}
+        <div className="flex items-center gap-4 text-xs text-slate-500 shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span>Thời gian thu:</span>
+            {roGeneral ? (
+              <span className="text-slate-700">{list[0]?.thoiGianThu ? new Date(list[0].thoiGianThu).toLocaleDateString("vi-VN") : "–"}</span>
+            ) : (
+              <DateInputVN value={list[0]?.thoiGianThu || ""}
+                onChange={(e) => { const v = e.target.value || null; list.forEach((x) => onEdit(x.id, "thoiGianThu", v)); }}
+                title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
+                className="w-24 text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span>Lô chủng:</span>
+            {roGeneral ? (
+              <span className="text-slate-700">{list[0]?.loChung || "–"}</span>
+            ) : (
+              <EditText v={list[0]?.loChung} commitOnBlur w="w-16"
+                title="Áp dụng cho cả lô — các chai cùng lô luôn chung 1 lô chủng"
+                on={(x) => { list.forEach((row) => onEdit(row.id, "loChung", x)); }} />
+            )}
+          </div>
+        </div>
+        <div className="flex-1" />
         {canRowAction && status === "cho-kqkn" && <AddBottleInline lo={groupKey} onAdd={onAddBottle} />}
       </div>
       {isOpen && (
@@ -1508,7 +1576,7 @@ function MaterialGroupTable({
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-white text-slate-400 border-b border-slate-100 text-left">
               <tr>
-                {["STT","Số lô","Thời gian thu","Lô chủng","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
+                {["STT","Số lô","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
                   h ? <th key={i} className="px-3 py-2 font-medium">{h}</th> : null)}
                 <th className="px-2"></th>
               </tr>
@@ -1533,25 +1601,6 @@ function MaterialGroupTable({
                     className={`border-b border-slate-50 hover:bg-slate-50/60 ${qcRed ? "bg-red-200 hover:bg-red-200" : ""}`}>
                     <td className="px-3 py-1.5 text-slate-400">{r.stt}</td>
                     <td className="px-3 py-1.5 font-mono">{r.soLo || "–"}</td>
-                    {roGeneral ? (
-                      <td className="px-2 py-1 text-slate-600">{r.thoiGianThu ? new Date(r.thoiGianThu).toLocaleDateString("vi-VN") : "–"}</td>
-                    ) : (
-                      <SelectableTd {...cellProps("thoiGianThu")} className="px-2 py-1 text-slate-600">
-                        <input type="date" value={r.thoiGianThu || ""}
-                          onChange={(e)=>{ const v = e.target.value || null; list.forEach((x)=>onEdit(x.id,"thoiGianThu", v)); }}
-                          title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
-                          className="text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
-                      </SelectableTd>
-                    )}
-                    {roGeneral ? (
-                      <td className="px-2 py-1">{r.loChung || "–"}</td>
-                    ) : (
-                      <SelectableTd {...cellProps("loChung")} className="px-2 py-1">
-                        <EditText v={r.loChung} commitOnBlur w="w-16"
-                          title="Áp dụng cho cả lô — các chai cùng lô luôn chung 1 lô chủng"
-                          on={(x)=>{ list.forEach((row)=>onEdit(row.id,"loChung",x)); }} />
-                      </SelectableTd>
-                    )}
                     {roGeneral ? (
                       <td className="px-2 py-1 text-right">{fmt(r.vDich,1)}</td>
                     ) : (
@@ -1695,6 +1744,114 @@ function MaterialGroupTable({
   );
 }
 
+const STRAIN_SHORT_LABEL = { subtilis: "B. subtilis", clausii: "B. clausii" };
+const CHO_XU_LY_REPORT_HEADERS = ["Số lô", "Nguyên liệu", "Chủng", "Thời gian thu", "Lý do", "Ghi chú"];
+
+// Gộp danh sách NL "Chờ xử lý" (dù nhiễm khuẩn không đạt, hết hạn dùng, hay chuyển tay) theo
+// THÁNG SẢN XUẤT (productionDate, suy từ số lô — khớp cách "Xu hướng NL" đang tính, luôn có sẵn
+// không phụ thuộc NCV đã nhập thời gian thu hay chưa) — để NCV/QC báo cáo nhanh mỗi tháng có bao
+// nhiêu chai không đạt mà không phải tự đếm tay trong bảng dài. Copy theo tháng hoặc copy hết 1
+// lượt (kèm cột Tháng) để dán thẳng vào mail — copy cả text/html (bảng thật khi dán vào Gmail) lẫn
+// text/plain (dán được cả vào nơi không hiện HTML), theo đúng cách copyTable() ở MixPlanPanel.
+function ChoXuLyMonthlyReport({ rows, setNote }) {
+  const [openMonth, setOpenMonth] = useState(null);
+
+  const byMonth = useMemo(() => {
+    const map = new Map();
+    for (const r of rows) {
+      const pd = productionDate(r);
+      const mk = pd ? `${pd.getFullYear()}-${String(pd.getMonth() + 1).padStart(2, "0")}` : "?";
+      if (!map.has(mk)) map.set(mk, []);
+      map.get(mk).push(r);
+    }
+    return [...map.entries()].sort(([a], [b]) => (a === "?" ? 1 : b === "?" ? -1 : b.localeCompare(a)));
+  }, [rows]);
+
+  const monthLabel = (mk) => (mk === "?" ? "Không rõ tháng SX" : monthLabelVN(mk));
+  const rowCells = (r) => [
+    r.soLo || "", r.tenNL || "", STRAIN_SHORT_LABEL[r.strain] || "",
+    r.thoiGianThu ? new Date(r.thoiGianThu).toLocaleDateString("vi-VN") : "",
+    (statusOf(r).reasons || []).join(" · "), r.ghiChu || "",
+  ];
+
+  const doCopy = async (label, headers, dataRows) => {
+    const text = [label, headers.join("\t"), ...dataRows.map((row) => row.join("\t"))].join("\n");
+    const html = `<p><b>${label}</b></p><table border="1" cellspacing="0" cellpadding="4">` +
+      `<thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>` +
+      `<tbody>${dataRows.map((row) => `<tr>${row.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) }),
+      ]);
+      setNote(`Đã copy bảng ${label.toLowerCase()} — dán vào Gmail.`);
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        setNote(`Đã copy bảng ${label.toLowerCase()} (dạng text) — dán vào Gmail.`);
+      } catch (err) {
+        setNote(`Không copy được: ${err.message}`);
+      }
+    }
+  };
+
+  const copyMonth = (mk, items) => doCopy(monthLabel(mk), CHO_XU_LY_REPORT_HEADERS, items.map(rowCells));
+  const copyAll = () => doCopy(
+    "Toàn bộ NL chờ xử lý",
+    ["Tháng", ...CHO_XU_LY_REPORT_HEADERS],
+    byMonth.flatMap(([mk, items]) => items.map((r) => [monthLabel(mk), ...rowCells(r)])),
+  );
+
+  if (!rows.length) return null;
+
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 overflow-hidden mb-3">
+      <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2">
+        <span className="font-medium text-sm">Thống kê theo tháng ({rows.length} chai)</span>
+        <button onClick={copyAll} className="flex items-center gap-1 text-xs text-sky-700 hover:underline">
+          <Copy className="w-3.5 h-3.5" /> Copy toàn bộ (mọi tháng)
+        </button>
+      </div>
+      <table className="w-full text-xs">
+        <tbody>
+          {byMonth.map(([mk, items]) => (
+            <React.Fragment key={mk}>
+              <tr className="border-b border-slate-50 hover:bg-slate-50/60 cursor-pointer" onClick={() => setOpenMonth(openMonth === mk ? null : mk)}>
+                <td className="px-3 py-2 text-slate-400 w-8">{openMonth === mk ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}</td>
+                <td className="px-3 py-2 font-medium">{monthLabel(mk)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-slate-500">{items.length} chai</td>
+                <td className="px-3 py-2 text-right">
+                  <button onClick={(e) => { e.stopPropagation(); copyMonth(mk, items); }}
+                    className="flex items-center gap-1 text-sky-700 hover:underline ml-auto">
+                    <Copy className="w-3.5 h-3.5" /> Copy
+                  </button>
+                </td>
+              </tr>
+              {openMonth === mk && (
+                <tr>
+                  <td colSpan={4} className="px-3 pb-3">
+                    <table className="w-full text-xs border border-slate-100 rounded overflow-hidden">
+                      <thead className="bg-slate-50 text-slate-500">
+                        <tr>{CHO_XU_LY_REPORT_HEADERS.map((h) => <th key={h} className="px-2 py-1.5 text-left font-medium">{h}</th>)}</tr>
+                      </thead>
+                      <tbody>
+                        {items.map((r) => (
+                          <tr key={r.id} className="border-t border-slate-100">
+                            {rowCells(r).map((c, i) => <td key={i} className="px-2 py-1.5 whitespace-normal">{c || "–"}</td>)}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+              )}
+            </React.Fragment>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy, setNote }) {
   const ro = status === "da-pha" || status === "da-huy" || status === "cho-xoa";
   // Thời gian thu/Lô chủng/V dịch: chỉ admin sửa được (dữ liệu nhập liệu/logistics, không phải "kết
@@ -1719,19 +1876,26 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
     const chaiNum = (r) => parseInt(String(r.chai || "").replace(/[^0-9]/g, ""), 10) || 0;
     for (const list of Object.values(g)) list.sort((a, b) => chaiNum(a) - chaiNum(b) || a.soLo.localeCompare(b.soLo));
     const entries = Object.entries(g);
+    // Ưu tiên thời gian thu (đúng ngày NCV nhập), suy từ số lô (parseSoLoOrderKey — có phân
+    // biệt ngày/thứ tự trong tháng, khác productionDate vốn chỉ lấy tới tháng) nếu chưa có
+    // thời gian thu — dùng chung cho cả 2 nhánh sắp xếp bên dưới, chỉ khác chiều.
+    const refKey = (list) => {
+      const r = list[0];
+      if (r.thoiGianThu) {
+        const n = parseInt(String(r.thoiGianThu).replace(/-/g, ""), 10);
+        if (!isNaN(n)) return n;
+      }
+      return parseSoLoOrderKey(r.soLo) ?? -Infinity;
+    };
     if (status === "cho-xu-ly") {
-      // Chờ xử lý: lô sản xuất GẦN ĐÂY hơn đẩy lên trên — ưu tiên thời gian thu,
-      // suy từ số lô (dùng parseSoLoOrderKey — có phân biệt ngày/thứ tự trong
-      // tháng, khác productionDate vốn chỉ lấy tới tháng) nếu chưa có thời gian thu.
-      const refKey = (list) => {
-        const r = list[0];
-        if (r.thoiGianThu) {
-          const n = parseInt(String(r.thoiGianThu).replace(/-/g, ""), 10);
-          if (!isNaN(n)) return n;
-        }
-        return parseSoLoOrderKey(r.soLo) ?? -Infinity;
-      };
+      // Chờ xử lý: lô sản xuất GẦN ĐÂY hơn đẩy lên trên.
       return entries.sort((a, b) => refKey(b[1]) - refKey(a[1]));
+    }
+    if (status === "cho-pha") {
+      // Chờ pha: NL thu CÀNG LÂU càng đẩy lên trên (khớp đúng thứ tự FIFO mà thuật toán tính
+      // mẻ pha đang dùng để chọn lô — xem mixPlanner.js fifoCompare/compareThoiGianThu), để
+      // NCV nhìn bảng cũng thấy đúng thứ tự chai sẽ được ưu tiên pha trước.
+      return entries.sort((a, b) => refKey(a[1]) - refKey(b[1]));
     }
     return entries.sort((a, b) => a[0].localeCompare(b[0]));
   }, [rows, status]);
@@ -2646,7 +2810,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       if (pool === "clausii-loai2") return r.strain === "clausii" && st.loai === 2;
       return false;
     })
-    .map((r) => ({ maLo: r.soLo, E: r.mdSH * 1e10, F: r.vDich, loSanXuat: r.lo }));
+    .map((r) => ({ maLo: r.soLo, E: r.mdSH * 1e10, F: r.vDich, loSanXuat: r.lo, thoiGianThu: r.thoiGianThu }));
   const OTHER_LOAI = { "clausii-loai1": "clausii-loai2", "clausii-loai2": "clausii-loai1" };
   // allowOther: gộp thêm loại NL còn lại làm dự phòng (priority=1, chỉ đụng tới khi loại chính
   // priority=0 không đủ) — vd Progermila ưu tiên loại 1 nhưng vẫn dùng được loại 2 khi cần.
@@ -2957,17 +3121,24 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           </div>
           <div>
             <label className="text-xs text-slate-500">Số ống cần cho nhịp này</label>
-            <input value={nInput} onChange={(e) => setNInput(e.target.value)} placeholder="vd 120000"
+            <input value={groupIntStr(nInput)} onChange={(e) => setNInput(digitsOnly(e.target.value))} placeholder="vd 120.000"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-40" />
           </div>
           <div>
-            <label className="text-xs text-slate-500">Hàm lượng đích{sp.pool2 ? ` – ${POOL_LABEL[sp.pool]}` : ""} (cfu/ml)</label>
+            {/* Ô cho gõ tự do (kể cả dạng khoa học "4e8") nên không chấm hàng nghìn trong ô được —
+                thay vào đó chêm dạng đọc-hiểu (4,2×10⁸) ngay vào label, cập nhật live theo giá trị
+                đang gõ, đỡ phải thêm hẳn 1 dòng riêng bên dưới. */}
+            <label className="text-xs text-slate-500">
+              Hàm lượng đích{sp.pool2 ? ` – ${POOL_LABEL[sp.pool]}` : ""} ({sciVN(num(gInput)) ? `${sciVN(num(gInput))} ` : ""}cfu/ml)
+            </label>
             <input value={gInput} onChange={(e) => setGInput(e.target.value)} placeholder="vd 4e8"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
           </div>
           {sp.pool2 && (
             <div>
-              <label className="text-xs text-slate-500">Hàm lượng đích – {POOL_LABEL[sp.pool2]} (cfu/ml)</label>
+              <label className="text-xs text-slate-500">
+                Hàm lượng đích – {POOL_LABEL[sp.pool2]} ({sciVN(num(gInput2)) ? `${sciVN(num(gInput2))} ` : ""}cfu/ml)
+              </label>
               <input value={gInput2} onChange={(e) => setGInput2(e.target.value)} placeholder="vd 4e8"
                 className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
             </div>
@@ -3473,21 +3644,15 @@ function BatchPlanTable({ plan, sp, isTwo, batchOverrides = {}, sterilizeOverrid
                     <td colSpan={isTwo ? 12 : 11} className="px-3 py-1.5 text-center">
                       {r.needSterilizeBefore ? (
                         <span className="text-amber-700 font-medium">
-                          🧼 Vệ sinh — tiệt trùng hệ thống trước khi pha mẻ {r.meSo} (đổi lô sản xuất)
+                          🧼 Vệ sinh — tiệt trùng hệ thống trước khi pha mẻ {r.meSo}
                           {onSterilizeToggle && (
-                            <button onClick={() => onSterilizeToggle(r.meSo, false)} className="ml-2 text-[11px] underline text-amber-600 hover:text-amber-800">bỏ mốc này</button>
-                          )}
-                          {r.meSo in sterilizeOverrides && (
-                            <button onClick={() => onSterilizeToggle(r.meSo, undefined)} className="ml-2 text-[11px] underline text-slate-400 hover:text-slate-600">↺ theo tự động</button>
+                            <button onClick={() => onSterilizeToggle(r.meSo, false)} className="ml-2 text-[11px] underline text-amber-600 hover:text-amber-800">bỏ đánh dấu</button>
                           )}
                         </span>
                       ) : (
                         <span className="text-[11px] text-slate-400">
                           — không cần tiệt trùng trước mẻ {r.meSo} —
-                          <button onClick={() => onSterilizeToggle(r.meSo, true)} className="ml-2 underline text-slate-400 hover:text-slate-600">+ chọn tiệt trùng ở đây</button>
-                          {r.meSo in sterilizeOverrides && (
-                            <button onClick={() => onSterilizeToggle(r.meSo, undefined)} className="ml-2 underline text-slate-300 hover:text-slate-500">↺ theo tự động</button>
-                          )}
+                          <button onClick={() => onSterilizeToggle(r.meSo, true)} className="ml-2 underline text-slate-400 hover:text-slate-600">+ đánh dấu cần tiệt trùng</button>
                         </span>
                       )}
                     </td>
@@ -3606,19 +3771,18 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
   const sterilizePoints = computeSterilizeFlags(plan.batches, sterilizeOverrides)
     .map((need, i) => (need ? plan.batches[i].meSo : null))
     .filter((v) => v != null);
-  if (sterilizePoints.length) warnings.push(`Cần VỆ SINH — TIỆT TRÙNG hệ thống trước (các) mẻ ${sterilizePoints.join(", ")} (đã dùng đủ trên ${MIN_LO_SAN_XUAT_TRUOC_KHI_VE_SINH} lô sản xuất khác nhau kể từ lần tiệt trùng trước).`);
-  // Cảnh báo RIÊNG khi mẻ SAU đổi sang (các) lô sản xuất clausii KHÁC với mẻ TRƯỚC — tách biệt khỏi
-  // cảnh báo chung ≥3-lô ở trên (có thể chưa tới ngưỡng 3 nhưng đổi lô clausii vẫn cần biết ngay, vì
-  // clausii pha chung 1 tank với subtilis nên đổi lô clausii cũng đồng nghĩa cần tiệt trùng để tránh
-  // nhiễm chéo giữa 2 đợt lên men clausii khác nhau — gợi ý theo nguyên tắc 2, tách theo TỪNG chủng
-  // thay vì gộp chung với lô subtilis như cảnh báo 3-lô phía trên).
+  if (sterilizePoints.length) warnings.push(`Đã đánh dấu cần VỆ SINH — TIỆT TRÙNG hệ thống trước (các) mẻ ${sterilizePoints.join(", ")}.`);
+  // Cảnh báo RIÊNG khi mẻ SAU đổi sang (các) lô sản xuất clausii KHÁC với mẻ TRƯỚC — clausii pha
+  // chung 1 tank với subtilis nên đổi lô clausii cũng đồng nghĩa nên tiệt trùng để tránh nhiễm chéo
+  // giữa 2 đợt lên men clausii khác nhau (gợi ý thông tin, không tự đánh dấu — NCV vẫn tự quyết
+  // định đánh dấu tiệt trùng ở mẻ nào, xem computeSterilizeFlags).
   if (isTwo) {
     for (let i = 1; i < plan.batches.length; i++) {
       const prevClau = new Set(plan.batches[i - 1].clausiiLoSanXuatList || []);
       const curClau = new Set(plan.batches[i].clausiiLoSanXuatList || []);
       const finishedLots = [...prevClau].filter((lo) => !curClau.has(lo));
       if (finishedLots.length && prevClau.size > 0) {
-        warnings.push(`Mẻ ${plan.batches[i - 1].meSo} là mẻ CUỐI dùng lô clausii ${finishedLots.join(", ")} — nên tiệt trùng trước khi sang mẻ ${plan.batches[i].meSo} (đổi lô clausii, dù chưa chạm ngưỡng 3 lô sản xuất).`);
+        warnings.push(`Mẻ ${plan.batches[i - 1].meSo} là mẻ CUỐI dùng lô clausii ${finishedLots.join(", ")} — nên tiệt trùng trước khi sang mẻ ${plan.batches[i].meSo} (đổi lô clausii).`);
       }
     }
   }
@@ -3802,36 +3966,16 @@ function batchDensityChecks(plan, isTwo) {
   });
 }
 
-// Xưởng chỉ cần vệ sinh — tiệt trùng hệ thống sau khi tank đã lần lượt "dính" tới TỐI THIỂU 3 lô
-// sản xuất khác nhau kể từ lần vệ sinh gần nhất — không phải cứ đổi sang lô sản xuất mới (dù chỉ
-// 1) là phải tiệt trùng ngay (chốt lại với NCV 2026-07-29, trước đó thuật toán báo tiệt trùng quá
-// dày, gần như mẻ nào cũng dính).
-const MIN_LO_SAN_XUAT_TRUOC_KHI_VE_SINH = 3;
-
-/** Duyệt tuần tự các mẻ, gộp dồn số lô sản xuất KHÁC NHAU đã chạm tới kể từ lần vệ sinh gần nhất
- * (tính cả trường hợp 1 mẻ tự nó đã trộn ≥2 lô) — khi tổng dồn vượt quá ngưỡng, đánh dấu cần vệ
- * sinh NGAY TRƯỚC mẻ đang xét rồi mở lại 1 cửa sổ đếm mới bắt đầu từ chính (các) lô sản xuất của
- * mẻ đó. Trả về mảng boolean cùng độ dài plan.batches.
- *
- * `overrides` (key = b.meSo, value = true/false) cho phép NCV TỰ CHỌN ép có/không cần tiệt trùng
- * trước 1 mẻ cụ thể, ghi đè lên quy tắc tự động 3-lô-sản-xuất ở trên — NCV đứng máy biết rõ tình
- * huống thực tế hơn 1 con số đếm đơn thuần. Ép "có" cũng làm mở lại cửa sổ đếm (giống tiệt trùng
- * thật xảy ra); ép "không" thì KHÔNG mở lại cửa sổ (cửa sổ vẫn cộng dồn tiếp qua mẻ đó).
+/** Đánh dấu vệ sinh — tiệt trùng hệ thống trước 1 mẻ: HOÀN TOÀN TỰ CHỌN, không tự tính theo quy
+ * tắc "đổi lô sản xuất" nữa (bản cũ tự gợi ý theo ngưỡng 3 lô sản xuất khác nhau, nhưng chọn "không
+ * cần" ở 1 mẻ không tự reset ngưỡng nên mẻ SAU vẫn bị đẩy hỏi lại — phản hồi NCV 2026-09: đứng máy
+ * tự biết rõ khi nào thật sự cần hơn hẳn 1 con số đếm đơn thuần, không muốn bị hỏi lặp lại nhiều
+ * lần). Mỗi mẻ mặc định KHÔNG cần, NCV tự bấm đánh dấu mẻ nào cần vệ sinh trước khi pha — quyết
+ * định ở 1 mẻ không kéo theo/ảnh hưởng mẻ khác. `overrides` (key = b.meSo, value = true) là danh
+ * sách mẻ đã tự đánh dấu. Trả về mảng boolean cùng độ dài plan.batches.
  */
 function computeSterilizeFlags(batches, overrides = {}) {
-  const flags = [];
-  let sinceClean = new Set();
-  batches.forEach((b, bi) => {
-    const lots = b.loSanXuatList || [];
-    const newOnes = lots.filter((lo) => !sinceClean.has(lo));
-    const auto = sinceClean.size + newOnes.length > MIN_LO_SAN_XUAT_TRUOC_KHI_VE_SINH;
-    const manual = overrides[b.meSo];
-    const needSterilizeBefore = bi > 0 && (manual !== undefined ? manual : auto);
-    if (needSterilizeBefore) sinceClean = new Set(); // vừa tiệt trùng xong -> mở cửa sổ đếm mới
-    lots.forEach((lo) => sinceClean.add(lo));
-    flags.push(needSterilizeBefore);
-  });
-  return flags;
+  return batches.map((b, bi) => bi > 0 && overrides[b.meSo] === true);
 }
 
 /** Gộp NL đã dùng theo TỪNG LÔ (qua mọi mẻ) — cho NCV thấy rõ 1 lô bị tách lẻ dùng ở những mẻ nào,
@@ -4140,13 +4284,13 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-slate-500">Từ</label>
-          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+          <DateInputVN value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-slate-500">Đến</label>
-          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+          <DateInputVN value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
         </div>
         {hasActiveFilter && (
           <button onClick={resetFilters} className="flex items-center gap-1 text-slate-500 hover:text-rose-600 py-1.5">
@@ -4202,13 +4346,13 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
                         <td className="px-2 py-1 text-center truncate">{canEdit ? <EditText v={b.soLo} on={(x) => edit(b.id, "soLo", x)} w="w-full" ph="Số lô" /> : (b.soLo || "–")}</td>
                         <td className="px-2 py-1 text-center">
                           {canEdit ? (
-                            <input type="date" value={b.nsx || ""} onChange={(e) => edit(b.id, "nsx", e.target.value || null)}
+                            <DateInputVN value={b.nsx || ""} onChange={(e) => edit(b.id, "nsx", e.target.value || null)}
                               className="w-full text-xs text-center border border-slate-200 rounded px-1.5 py-1" />
                           ) : (b.nsx ? new Date(b.nsx).toLocaleDateString("vi-VN") : "–")}
                         </td>
                         <td className="px-2 py-1 text-center">
                           {canEdit ? (
-                            <input type="date" value={b.hsd || ""} onChange={(e) => edit(b.id, "hsd", e.target.value || null)}
+                            <DateInputVN value={b.hsd || ""} onChange={(e) => edit(b.id, "hsd", e.target.value || null)}
                               className="w-full text-xs text-center border border-slate-200 rounded px-1.5 py-1" />
                           ) : (b.hsd ? new Date(b.hsd).toLocaleDateString("vi-VN") : "–")}
                         </td>
