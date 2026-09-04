@@ -1212,6 +1212,11 @@ function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur, title })
 // ngăn cách hàng nghìn kiểu vi-VN (vd 10000000 -> "10.000.000"), lúc bấm vào gõ thì trả về
 // số thô (không dấu chấm) để không vướng lúc gõ/xoá.
 const groupNum = (n) => (n == null || n === "" ? "" : Number(n).toLocaleString("vi-VN", { maximumFractionDigits: 6 }));
+// Ô nhập số nguyên (vd Số ống) cần chấm ngay LÚC ĐANG GÕ (khác EditNum chỉ chấm lúc blur) —
+// state vẫn giữ nguyên chuỗi số thô không dấu chấm (chỗ khác đang parse bằng num() không đổi
+// gì), input chỉ hiện bản có chấm; gõ ký tự nào không phải số thì tự bỏ qua luôn.
+const digitsOnly = (s) => String(s || "").replace(/\D/g, "");
+const groupIntStr = (s) => { const d = digitsOnly(s); return d ? Number(d).toLocaleString("vi-VN") : ""; };
 function EditNum({ v, on, w = "w-16" }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
@@ -3105,7 +3110,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           </div>
           <div>
             <label className="text-xs text-slate-500">Số ống cần cho nhịp này</label>
-            <input value={nInput} onChange={(e) => setNInput(e.target.value)} placeholder="vd 120000"
+            <input value={groupIntStr(nInput)} onChange={(e) => setNInput(digitsOnly(e.target.value))} placeholder="vd 120.000"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-40" />
           </div>
           <div>
@@ -3621,21 +3626,15 @@ function BatchPlanTable({ plan, sp, isTwo, batchOverrides = {}, sterilizeOverrid
                     <td colSpan={isTwo ? 12 : 11} className="px-3 py-1.5 text-center">
                       {r.needSterilizeBefore ? (
                         <span className="text-amber-700 font-medium">
-                          🧼 Vệ sinh — tiệt trùng hệ thống trước khi pha mẻ {r.meSo} (đổi lô sản xuất)
+                          🧼 Vệ sinh — tiệt trùng hệ thống trước khi pha mẻ {r.meSo}
                           {onSterilizeToggle && (
-                            <button onClick={() => onSterilizeToggle(r.meSo, false)} className="ml-2 text-[11px] underline text-amber-600 hover:text-amber-800">bỏ mốc này</button>
-                          )}
-                          {r.meSo in sterilizeOverrides && (
-                            <button onClick={() => onSterilizeToggle(r.meSo, undefined)} className="ml-2 text-[11px] underline text-slate-400 hover:text-slate-600">↺ theo tự động</button>
+                            <button onClick={() => onSterilizeToggle(r.meSo, false)} className="ml-2 text-[11px] underline text-amber-600 hover:text-amber-800">bỏ đánh dấu</button>
                           )}
                         </span>
                       ) : (
                         <span className="text-[11px] text-slate-400">
                           — không cần tiệt trùng trước mẻ {r.meSo} —
-                          <button onClick={() => onSterilizeToggle(r.meSo, true)} className="ml-2 underline text-slate-400 hover:text-slate-600">+ chọn tiệt trùng ở đây</button>
-                          {r.meSo in sterilizeOverrides && (
-                            <button onClick={() => onSterilizeToggle(r.meSo, undefined)} className="ml-2 underline text-slate-300 hover:text-slate-500">↺ theo tự động</button>
-                          )}
+                          <button onClick={() => onSterilizeToggle(r.meSo, true)} className="ml-2 underline text-slate-400 hover:text-slate-600">+ đánh dấu cần tiệt trùng</button>
                         </span>
                       )}
                     </td>
@@ -3754,19 +3753,18 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
   const sterilizePoints = computeSterilizeFlags(plan.batches, sterilizeOverrides)
     .map((need, i) => (need ? plan.batches[i].meSo : null))
     .filter((v) => v != null);
-  if (sterilizePoints.length) warnings.push(`Cần VỆ SINH — TIỆT TRÙNG hệ thống trước (các) mẻ ${sterilizePoints.join(", ")} (đã dùng đủ trên ${MIN_LO_SAN_XUAT_TRUOC_KHI_VE_SINH} lô sản xuất khác nhau kể từ lần tiệt trùng trước).`);
-  // Cảnh báo RIÊNG khi mẻ SAU đổi sang (các) lô sản xuất clausii KHÁC với mẻ TRƯỚC — tách biệt khỏi
-  // cảnh báo chung ≥3-lô ở trên (có thể chưa tới ngưỡng 3 nhưng đổi lô clausii vẫn cần biết ngay, vì
-  // clausii pha chung 1 tank với subtilis nên đổi lô clausii cũng đồng nghĩa cần tiệt trùng để tránh
-  // nhiễm chéo giữa 2 đợt lên men clausii khác nhau — gợi ý theo nguyên tắc 2, tách theo TỪNG chủng
-  // thay vì gộp chung với lô subtilis như cảnh báo 3-lô phía trên).
+  if (sterilizePoints.length) warnings.push(`Đã đánh dấu cần VỆ SINH — TIỆT TRÙNG hệ thống trước (các) mẻ ${sterilizePoints.join(", ")}.`);
+  // Cảnh báo RIÊNG khi mẻ SAU đổi sang (các) lô sản xuất clausii KHÁC với mẻ TRƯỚC — clausii pha
+  // chung 1 tank với subtilis nên đổi lô clausii cũng đồng nghĩa nên tiệt trùng để tránh nhiễm chéo
+  // giữa 2 đợt lên men clausii khác nhau (gợi ý thông tin, không tự đánh dấu — NCV vẫn tự quyết
+  // định đánh dấu tiệt trùng ở mẻ nào, xem computeSterilizeFlags).
   if (isTwo) {
     for (let i = 1; i < plan.batches.length; i++) {
       const prevClau = new Set(plan.batches[i - 1].clausiiLoSanXuatList || []);
       const curClau = new Set(plan.batches[i].clausiiLoSanXuatList || []);
       const finishedLots = [...prevClau].filter((lo) => !curClau.has(lo));
       if (finishedLots.length && prevClau.size > 0) {
-        warnings.push(`Mẻ ${plan.batches[i - 1].meSo} là mẻ CUỐI dùng lô clausii ${finishedLots.join(", ")} — nên tiệt trùng trước khi sang mẻ ${plan.batches[i].meSo} (đổi lô clausii, dù chưa chạm ngưỡng 3 lô sản xuất).`);
+        warnings.push(`Mẻ ${plan.batches[i - 1].meSo} là mẻ CUỐI dùng lô clausii ${finishedLots.join(", ")} — nên tiệt trùng trước khi sang mẻ ${plan.batches[i].meSo} (đổi lô clausii).`);
       }
     }
   }
@@ -3950,36 +3948,16 @@ function batchDensityChecks(plan, isTwo) {
   });
 }
 
-// Xưởng chỉ cần vệ sinh — tiệt trùng hệ thống sau khi tank đã lần lượt "dính" tới TỐI THIỂU 3 lô
-// sản xuất khác nhau kể từ lần vệ sinh gần nhất — không phải cứ đổi sang lô sản xuất mới (dù chỉ
-// 1) là phải tiệt trùng ngay (chốt lại với NCV 2026-07-29, trước đó thuật toán báo tiệt trùng quá
-// dày, gần như mẻ nào cũng dính).
-const MIN_LO_SAN_XUAT_TRUOC_KHI_VE_SINH = 3;
-
-/** Duyệt tuần tự các mẻ, gộp dồn số lô sản xuất KHÁC NHAU đã chạm tới kể từ lần vệ sinh gần nhất
- * (tính cả trường hợp 1 mẻ tự nó đã trộn ≥2 lô) — khi tổng dồn vượt quá ngưỡng, đánh dấu cần vệ
- * sinh NGAY TRƯỚC mẻ đang xét rồi mở lại 1 cửa sổ đếm mới bắt đầu từ chính (các) lô sản xuất của
- * mẻ đó. Trả về mảng boolean cùng độ dài plan.batches.
- *
- * `overrides` (key = b.meSo, value = true/false) cho phép NCV TỰ CHỌN ép có/không cần tiệt trùng
- * trước 1 mẻ cụ thể, ghi đè lên quy tắc tự động 3-lô-sản-xuất ở trên — NCV đứng máy biết rõ tình
- * huống thực tế hơn 1 con số đếm đơn thuần. Ép "có" cũng làm mở lại cửa sổ đếm (giống tiệt trùng
- * thật xảy ra); ép "không" thì KHÔNG mở lại cửa sổ (cửa sổ vẫn cộng dồn tiếp qua mẻ đó).
+/** Đánh dấu vệ sinh — tiệt trùng hệ thống trước 1 mẻ: HOÀN TOÀN TỰ CHỌN, không tự tính theo quy
+ * tắc "đổi lô sản xuất" nữa (bản cũ tự gợi ý theo ngưỡng 3 lô sản xuất khác nhau, nhưng chọn "không
+ * cần" ở 1 mẻ không tự reset ngưỡng nên mẻ SAU vẫn bị đẩy hỏi lại — phản hồi NCV 2026-09: đứng máy
+ * tự biết rõ khi nào thật sự cần hơn hẳn 1 con số đếm đơn thuần, không muốn bị hỏi lặp lại nhiều
+ * lần). Mỗi mẻ mặc định KHÔNG cần, NCV tự bấm đánh dấu mẻ nào cần vệ sinh trước khi pha — quyết
+ * định ở 1 mẻ không kéo theo/ảnh hưởng mẻ khác. `overrides` (key = b.meSo, value = true) là danh
+ * sách mẻ đã tự đánh dấu. Trả về mảng boolean cùng độ dài plan.batches.
  */
 function computeSterilizeFlags(batches, overrides = {}) {
-  const flags = [];
-  let sinceClean = new Set();
-  batches.forEach((b, bi) => {
-    const lots = b.loSanXuatList || [];
-    const newOnes = lots.filter((lo) => !sinceClean.has(lo));
-    const auto = sinceClean.size + newOnes.length > MIN_LO_SAN_XUAT_TRUOC_KHI_VE_SINH;
-    const manual = overrides[b.meSo];
-    const needSterilizeBefore = bi > 0 && (manual !== undefined ? manual : auto);
-    if (needSterilizeBefore) sinceClean = new Set(); // vừa tiệt trùng xong -> mở cửa sổ đếm mới
-    lots.forEach((lo) => sinceClean.add(lo));
-    flags.push(needSterilizeBefore);
-  });
-  return flags;
+  return batches.map((b, bi) => bi > 0 && overrides[b.meSo] === true);
 }
 
 /** Gộp NL đã dùng theo TỪNG LÔ (qua mọi mẻ) — cho NCV thấy rõ 1 lô bị tách lẻ dùng ở những mẻ nào,
