@@ -2207,6 +2207,23 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
     finally { setBusyKey(null); }
   };
 
+  // Bỏ 1 LẦN tất cả các mẻ còn Chờ SX của CÙNG 1 nhịp sản xuất — gộp hết rows của mọi mẻ vào 1 lần
+  // gọi revertChoSXGroup (đúng hơn là lặp lại cancelMe từng mẻ: nếu 2 mẻ lỡ cùng tách ra từ 1 lô gốc,
+  // gộp chung 1 lần mới ra ĐÚNG 1 dòng duy nhất — lặp riêng từng mẻ có thể bị lệch vì mỗi lần gọi vẫn
+  // dùng chung 1 bản chụp `allMaterials` cũ, không thấy được kết quả của lần gọi trước) — đỡ phải bấm
+  // "Bỏ mẻ này" thủ công từng mẻ khi cần huỷ nguyên cả nhịp (NCV phản hồi 2026-09).
+  const cancelAllMe = async (planId, meEntries, spTen) => {
+    const allRows = meEntries.flatMap(([, rows]) => rows);
+    if (!window.confirm(`Bỏ ý định pha TẤT CẢ ${meEntries.length} mẻ của nhịp sản xuất ${spTen || ""}? NL sẽ trả về "Chờ pha" để tính vào kế hoạch khác.`)) return;
+    const key = `all-${planId}`;
+    setBusyKey(key);
+    try {
+      await revertChoSXGroup(allRows, allMaterials, actorId);
+      setNote(`Đã bỏ tất cả ${meEntries.length} mẻ của nhịp sản xuất ${spTen || ""} — NL trả về Chờ pha.`);
+    } catch (err) { setNote(`Lỗi bỏ tất cả mẻ: ${err.message}`); }
+    finally { setBusyKey(null); }
+  };
+
   if (!groups.length) {
     return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Chưa có NL nào đang chờ SX — NL sẽ tự chuyển sang đây sau khi 1 kế hoạch mẻ pha ở tab "Pha chế SX" được DUYỆT.</div>;
   }
@@ -2214,7 +2231,7 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500 flex items-center gap-1.5"><Factory className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Bấm "Xác nhận đã pha" đúng lúc mẻ đó thực sự đã pha xong; nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha".</p>
+        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Bấm "Xác nhận đã pha" đúng lúc mẻ đó thực sự đã pha xong; nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha" — hoặc bấm "Bỏ tất cả mẻ" ở đầu mỗi nhịp sản xuất nếu cần bỏ nguyên cả nhịp cùng lúc.</p>
       {groups.map(([planId, meEntries]) => {
         const allRows = meEntries.flatMap(([, rows]) => rows);
         const r0plan = allRows[0];
@@ -2230,10 +2247,19 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
               <div className="flex items-center justify-between px-1">
                 <span className="text-xs text-slate-400">Nhịp sản xuất {sp.tenSP} — {meEntries.length} mẻ đang Chờ SX</span>
                 {canEdit && (
-                  <button onClick={() => setExportPlanId(exportPlanId === planId ? null : planId)} title="Tạo bảng dữ liệu cả nhịp sản xuất để gửi mail"
-                    className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-800 border border-sky-200 hover:border-sky-300 rounded-md px-2 py-1.5 bg-white">
-                    <Mail className="w-3.5 h-3.5" /> Tạo thông tin gửi mail
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setExportPlanId(exportPlanId === planId ? null : planId)} title="Tạo bảng dữ liệu cả nhịp sản xuất để gửi mail"
+                      className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-800 border border-sky-200 hover:border-sky-300 rounded-md px-2 py-1.5 bg-white">
+                      <Mail className="w-3.5 h-3.5" /> Tạo thông tin gửi mail
+                    </button>
+                    {meEntries.length > 1 && (
+                      <button onClick={() => cancelAllMe(planId, meEntries, sp.tenSP)} disabled={busyKey != null}
+                        title="Bỏ ý định pha tất cả mẻ của nhịp sản xuất này, trả hết NL về Chờ pha"
+                        className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 bg-white disabled:opacity-40">
+                        <X className="w-3.5 h-3.5" /> Bỏ tất cả mẻ
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -2258,11 +2284,11 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
                     )}
                     {canEdit && (
                       <>
-                        <button onClick={() => confirmMe(key, rows)} disabled={busyKey === key}
+                        <button onClick={() => confirmMe(key, rows)} disabled={busyKey != null}
                           className="ml-auto flex items-center gap-1.5 bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
                           <CheckCircle2 className="w-3.5 h-3.5" /> Xác nhận đã pha
                         </button>
-                        <button onClick={() => cancelMe(key, rows)} disabled={busyKey === key} title="Bỏ mẻ này, trả NL về Chờ pha"
+                        <button onClick={() => cancelMe(key, rows)} disabled={busyKey != null} title="Bỏ mẻ này, trả NL về Chờ pha"
                           className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 disabled:opacity-40">
                           <X className="w-3.5 h-3.5" />
                         </button>
