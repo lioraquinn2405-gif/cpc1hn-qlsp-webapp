@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import LenMenPanel from "./LenMenPanel.jsx";
 import SeedLotPanel from "./SeedLotPanel.jsx";
+import DateInputVN from "./DateInputVN.jsx";
 import { supabase, supabaseConfigured } from "./lib/supabaseClient.js";
 import {
   fetchMaterials, fetchProducts, updateMaterialField, updateMaterialFields, removeMaterial,
@@ -1278,13 +1279,23 @@ function NLFilterBar({ loQuery, setLoQuery, statusTagFilter, setStatusTagFilter,
       </div>
       <div className="flex flex-col gap-1">
         <label className="text-slate-500">Từ</label>
-        <input type={dateInputType} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        {dateInputType === "date" ? (
+          <DateInputVN value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        ) : (
+          <input type="month" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        )}
       </div>
       <div className="flex flex-col gap-1">
         <label className="text-slate-500">Đến</label>
-        <input type={dateInputType} value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-          className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        {dateInputType === "date" ? (
+          <DateInputVN value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        ) : (
+          <input type="month" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+        )}
       </div>
       {hasActiveFilter && (
         <button onClick={onReset} className="flex items-center gap-1 text-slate-500 hover:text-rose-600 py-1.5">
@@ -1520,10 +1531,10 @@ function MaterialGroupTable({
             {roGeneral ? (
               <span className="text-slate-700">{list[0]?.thoiGianThu ? new Date(list[0].thoiGianThu).toLocaleDateString("vi-VN") : "–"}</span>
             ) : (
-              <input type="date" value={list[0]?.thoiGianThu || ""}
+              <DateInputVN value={list[0]?.thoiGianThu || ""}
                 onChange={(e) => { const v = e.target.value || null; list.forEach((x) => onEdit(x.id, "thoiGianThu", v)); }}
                 title="Áp dụng cho cả lô — các chai cùng lô luôn thu cùng ngày"
-                className="text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+                className="w-24 text-xs border border-slate-200 rounded px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
             )}
           </div>
           <div className="flex items-center gap-1.5">
@@ -1845,19 +1856,26 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
     const chaiNum = (r) => parseInt(String(r.chai || "").replace(/[^0-9]/g, ""), 10) || 0;
     for (const list of Object.values(g)) list.sort((a, b) => chaiNum(a) - chaiNum(b) || a.soLo.localeCompare(b.soLo));
     const entries = Object.entries(g);
+    // Ưu tiên thời gian thu (đúng ngày NCV nhập), suy từ số lô (parseSoLoOrderKey — có phân
+    // biệt ngày/thứ tự trong tháng, khác productionDate vốn chỉ lấy tới tháng) nếu chưa có
+    // thời gian thu — dùng chung cho cả 2 nhánh sắp xếp bên dưới, chỉ khác chiều.
+    const refKey = (list) => {
+      const r = list[0];
+      if (r.thoiGianThu) {
+        const n = parseInt(String(r.thoiGianThu).replace(/-/g, ""), 10);
+        if (!isNaN(n)) return n;
+      }
+      return parseSoLoOrderKey(r.soLo) ?? -Infinity;
+    };
     if (status === "cho-xu-ly") {
-      // Chờ xử lý: lô sản xuất GẦN ĐÂY hơn đẩy lên trên — ưu tiên thời gian thu,
-      // suy từ số lô (dùng parseSoLoOrderKey — có phân biệt ngày/thứ tự trong
-      // tháng, khác productionDate vốn chỉ lấy tới tháng) nếu chưa có thời gian thu.
-      const refKey = (list) => {
-        const r = list[0];
-        if (r.thoiGianThu) {
-          const n = parseInt(String(r.thoiGianThu).replace(/-/g, ""), 10);
-          if (!isNaN(n)) return n;
-        }
-        return parseSoLoOrderKey(r.soLo) ?? -Infinity;
-      };
+      // Chờ xử lý: lô sản xuất GẦN ĐÂY hơn đẩy lên trên.
       return entries.sort((a, b) => refKey(b[1]) - refKey(a[1]));
+    }
+    if (status === "cho-pha") {
+      // Chờ pha: NL thu CÀNG LÂU càng đẩy lên trên (khớp đúng thứ tự FIFO mà thuật toán tính
+      // mẻ pha đang dùng để chọn lô — xem mixPlanner.js fifoCompare/compareThoiGianThu), để
+      // NCV nhìn bảng cũng thấy đúng thứ tự chai sẽ được ưu tiên pha trước.
+      return entries.sort((a, b) => refKey(a[1]) - refKey(b[1]));
     }
     return entries.sort((a, b) => a[0].localeCompare(b[0]));
   }, [rows, status]);
@@ -2772,7 +2790,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       if (pool === "clausii-loai2") return r.strain === "clausii" && st.loai === 2;
       return false;
     })
-    .map((r) => ({ maLo: r.soLo, E: r.mdSH * 1e10, F: r.vDich, loSanXuat: r.lo }));
+    .map((r) => ({ maLo: r.soLo, E: r.mdSH * 1e10, F: r.vDich, loSanXuat: r.lo, thoiGianThu: r.thoiGianThu }));
   const OTHER_LOAI = { "clausii-loai1": "clausii-loai2", "clausii-loai2": "clausii-loai1" };
   // allowOther: gộp thêm loại NL còn lại làm dự phòng (priority=1, chỉ đụng tới khi loại chính
   // priority=0 không đủ) — vd Progermila ưu tiên loại 1 nhưng vẫn dùng được loại 2 khi cần.
@@ -4266,13 +4284,13 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-slate-500">Từ</label>
-          <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
-            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+          <DateInputVN value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
         </div>
         <div className="flex flex-col gap-1">
           <label className="text-slate-500">Đến</label>
-          <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
-            className="border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
+          <DateInputVN value={dateTo} onChange={(e) => setDateTo(e.target.value)}
+            className="w-24 border border-slate-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-emerald-400" />
         </div>
         {hasActiveFilter && (
           <button onClick={resetFilters} className="flex items-center gap-1 text-slate-500 hover:text-rose-600 py-1.5">
@@ -4328,13 +4346,13 @@ function ProductionHistoryPanel({ products, setNote, focusMaSP, focusTs, canEdit
                         <td className="px-2 py-1 text-center truncate">{canEdit ? <EditText v={b.soLo} on={(x) => edit(b.id, "soLo", x)} w="w-full" ph="Số lô" /> : (b.soLo || "–")}</td>
                         <td className="px-2 py-1 text-center">
                           {canEdit ? (
-                            <input type="date" value={b.nsx || ""} onChange={(e) => edit(b.id, "nsx", e.target.value || null)}
+                            <DateInputVN value={b.nsx || ""} onChange={(e) => edit(b.id, "nsx", e.target.value || null)}
                               className="w-full text-xs text-center border border-slate-200 rounded px-1.5 py-1" />
                           ) : (b.nsx ? new Date(b.nsx).toLocaleDateString("vi-VN") : "–")}
                         </td>
                         <td className="px-2 py-1 text-center">
                           {canEdit ? (
-                            <input type="date" value={b.hsd || ""} onChange={(e) => edit(b.id, "hsd", e.target.value || null)}
+                            <DateInputVN value={b.hsd || ""} onChange={(e) => edit(b.id, "hsd", e.target.value || null)}
                               className="w-full text-xs text-center border border-slate-200 rounded px-1.5 py-1" />
                           ) : (b.hsd ? new Date(b.hsd).toLocaleDateString("vi-VN") : "–")}
                         </td>

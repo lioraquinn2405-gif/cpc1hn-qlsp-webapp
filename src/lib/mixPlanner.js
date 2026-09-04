@@ -135,13 +135,26 @@ export function enumerateFeasibleSubsets(lots, vMin, vMax, { maxCandidates = 500
   return results;
 }
 
+// So sánh theo NGÀY THU THẬT (thoiGianThu, dạng ISO "YYYY-MM-DD" — so chuỗi trực tiếp là đủ
+// đúng thứ tự). Ưu tiên field này hơn mã lô vì mã lô chỉ mã hoá ngày SẢN XUẤT (đợt lên men) —
+// ngày THU THỰC TẾ có thể trễ hơn vài ngày và không phải lúc nào cũng khớp thứ tự mã lô (NCV
+// phản ánh 2026-09: có chai thu trước nhưng mã lô "trẻ" hơn vẫn bị xếp pha sau). Trả về 0 (coi
+// như bằng nhau, nhường cho tiêu chí kế tiếp) nếu 1 trong 2 lô thiếu ngày thu — dữ liệu cũ/nhập
+// tay thiếu sót vẫn phải xếp được, không được lỗi hay rơi ra ngoài kế hoạch.
+function compareThoiGianThu(a, b) {
+  if (!a.thoiGianThu || !b.thoiGianThu) return 0;
+  return a.thoiGianThu < b.thoiGianThu ? -1 : a.thoiGianThu > b.thoiGianThu ? 1 : 0;
+}
+
 /**
- * Chọn lô theo FIFO — NL sản xuất CÀNG LÂU càng ưu tiên dùng trước (tránh tồn kho quá hạn),
- * và vì đi tuần tự theo tuổi lô, tự nhiên cũng gom các chai CÙNG 1 lô sản xuất lại với nhau
- * (ít lô sản xuất bị chạm tới hơn = ít lần tiệt trùng hơn) — không cần tối ưu 2 mục tiêu này
- * tách riêng. Tích luỹ dần tới khi VỪA CHẠM mục tiêu `target` — LUÔN dùng TRỌN lô làm nó vượt
- * qua mốc (không cắt bớt để né vượt), số ống ra có thể nhỉnh hơn mục tiêu một chút do làm tròn
- * theo từng lô — chấp nhận được, NCV xem kết quả rồi quyết định dùng hết hay bớt lại.
+ * Chọn lô theo FIFO — NL THU CÀNG LÂU càng ưu tiên dùng trước (tránh tồn kho quá hạn), ưu tiên
+ * so theo đúng ngày thu thật (compareThoiGianThu); khi thiếu ngày thu mới lùi về so mã lô (đáng
+ * tin thứ nhì vì mã lô cũng mã hoá ngày sản xuất, thường sát ngày thu). Vì đi tuần tự theo tuổi
+ * lô, tự nhiên cũng gom các chai CÙNG 1 lô sản xuất lại với nhau (ít lô sản xuất bị chạm tới hơn
+ * = ít lần tiệt trùng hơn) — không cần tối ưu 2 mục tiêu này tách riêng. Tích luỹ dần tới khi VỪA
+ * CHẠM mục tiêu `target` — LUÔN dùng TRỌN lô làm nó vượt qua mốc (không cắt bớt để né vượt), số
+ * ống ra có thể nhỉnh hơn mục tiêu một chút do làm tròn theo từng lô — chấp nhận được, NCV xem
+ * kết quả rồi quyết định dùng hết hay bớt lại.
  *
  * Nếu lô có field `priority` (0 = loại chính, 1 = loại dự phòng — vd Progermila ưu tiên clausii
  * loại 1, chỉ đụng loại 2 khi loại 1 không đủ), luôn xếp hết loại chính (theo tuổi) trước khi
@@ -149,6 +162,7 @@ export function enumerateFeasibleSubsets(lots, vMin, vMax, { maxCandidates = 500
  */
 function fifoCompare(a, b) {
   return (a.priority ?? 0) - (b.priority ?? 0)
+    || compareThoiGianThu(a, b)
     || naturalCompareMaLo(loSanXuatOf(a), loSanXuatOf(b))
     || naturalCompareMaLo(a.maLo, b.maLo);
 }
@@ -289,7 +303,10 @@ function mergeSingleLotBatches(a, b) {
  * thiết. Mật độ luôn đúng G (không dò cao hơn, giống packSingleStreamBatches).
  */
 function packWholeBottleBatches(selectedLots, G, H, tankMaxL = TANK_MAX_L) {
-  const ordered = [...selectedLots].sort((a, b) => naturalCompareMaLo(a.maLo, b.maLo));
+  // Đóng gói mẻ cũng theo đúng thứ tự FIFO đã dùng để CHỌN lô (ngày thu trước hết trước) — trước
+  // đây sort riêng theo mã lô ở bước đóng gói này, có thể xáo lại thứ tự khác với lúc chọn nếu mã
+  // lô lệch ngày thu thật, khiến mẻ đầu tiên hiển thị không phải mẻ dùng NL cũ nhất.
+  const ordered = [...selectedLots].sort(fifoCompare);
   return ordered.map((lot, i) => {
     const theTichDich = (lot.F * lot.E) / G;
     const soOng = Math.floor((lot.F * lot.E * 1000) / (G * H));
@@ -307,7 +324,10 @@ function packWholeBottleBatches(selectedLots, G, H, tankMaxL = TANK_MAX_L) {
 }
 
 export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH) {
-  const ordered = [...selectedLots].sort((a, b) => naturalCompareMaLo(a.maLo, b.maLo));
+  // Đóng gói mẻ cũng theo đúng thứ tự FIFO đã dùng để CHỌN lô (ngày thu trước hết trước) — trước
+  // đây sort riêng theo mã lô ở bước đóng gói này, có thể xáo lại thứ tự khác với lúc chọn nếu mã
+  // lô lệch ngày thu thật, khiến mẻ đầu tiên hiển thị không phải mẻ dùng NL cũ nhất.
+  const ordered = [...selectedLots].sort(fifoCompare);
   const totalV = ordered.reduce((s, l) => s + (l.F * l.E) / d, 0);
   const nBatchesTarget = Math.max(1, Math.ceil(totalV / SOFT_TARGET_L - EPS));
   const groups = groupByLoSanXuat(ordered);
