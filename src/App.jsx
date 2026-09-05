@@ -2405,12 +2405,12 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
   // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode).
   const [maHoaMeBase, setMaHoaMeBase] = useState("");
-  // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), mẻ nào chọn riêng
-  // (chotHuongByMe có key) thì ghi đè, mẻ nào chưa đụng tới vẫn tự theo ô mặc định khi ô mặc định đổi.
+  // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
+  // trong bảng (cột "Chốt hướng xử lý hoàn thiện", giống cách 4 cột xử lý BTP kia đang làm) — mẻ
+  // nào chưa sửa riêng (chotHuongByMe không có key) vẫn tự theo ô mặc định khi ô mặc định đổi.
   const [chotHuongDefault, setChotHuongDefault] = useState(CHOT_HUONG_OPTIONS[0]);
   const [chotHuongDefaultCustom, setChotHuongDefaultCustom] = useState("");
   const [chotHuongByMe, setChotHuongByMe] = useState({});
-  const [chotHuongCustomByMe, setChotHuongCustomByMe] = useState({});
   // 4 trường xử lý BTP mặc định ĐỒNG BỘ theo giá trị chung ở trên cho MỌI lô — nhưng 1 vài lô có
   // thể được tách ra test ở điều kiện khác, nên vẫn cho sửa riêng từng lô (ghi đè), không phụ thuộc
   // hoàn toàn vào ô chung phía trên. Ô nào CHƯA bị sửa riêng thì vẫn tự theo ô chung khi ô chung đổi.
@@ -2420,12 +2420,9 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
   const maHoaMeFor = (meSo) => deriveMaHoaMe(maHoaMeBase, meSo);
   const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
-  const chotHuongValueFor = (meSo) => chotHuongByMe[meSo] ?? chotHuongDefault;
-  const chotHuongFinalFor = (meSo) => {
-    if (chotHuongByMe[meSo] === undefined) return chotHuongDefaultFinal;
-    const v = chotHuongByMe[meSo];
-    return v === KHAC_SENTINEL ? (chotHuongCustomByMe[meSo] || "") : v;
-  };
+  const chotHuongFinalFor = (meSo) => chotHuongByMe[meSo] ?? chotHuongDefaultFinal;
+  const chotHuongIsOverridden = (meSo) => chotHuongByMe[meSo] !== undefined;
+  const clearChotHuongForMe = (meSo) => setChotHuongByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
   const rowValue = (rowKey, field, globalValue) => rowOverrides[rowKey]?.[field] ?? globalValue;
   const setRowValue = (rowKey, field, val) => setRowOverrides((prev) => ({ ...prev, [rowKey]: { ...prev[rowKey], [field]: val } }));
   const clearRowValue = (rowKey, field) => setRowOverrides((prev) => {
@@ -2502,35 +2499,13 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
           value={quyTrinhKhac} onChange={setQuyTrinhKhac} custom={quyTrinhKhacCustom} onCustomChange={setQuyTrinhKhacCustom} />
         <ProcessSelect label="Chốt hướng xử lý hoàn thiện" options={CHOT_HUONG_OPTIONS}
           value={chotHuongDefault} onChange={setChotHuongDefault} custom={chotHuongDefaultCustom} onCustomChange={setChotHuongDefaultCustom} />
-      </div>
-      <p className="text-[11px] text-slate-400">5 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
-
-      <div className="bg-white border border-slate-200 rounded-md p-2.5">
-        <div className="mb-2">
-          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ (phần đầu, không kèm "C01") — mỗi mẻ tự nối C01, C02... tới mẻ cuối</label>
+        <div>
+          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ (phần đầu, không kèm "C01")</label>
           <input value={maHoaMeBase} onChange={(e) => setMaHoaMeBase(e.target.value)} placeholder="vd CB010526"
-            className="w-full sm:w-64 text-xs border border-slate-300 rounded px-2 py-1.5" />
-        </div>
-        <div className="space-y-1.5">
-          {batchGroups.map((g) => (
-            <div key={g.meSo} className="flex items-center gap-2">
-              <span className="text-xs font-medium w-14 shrink-0">Mẻ {g.meSo}</span>
-              <span className="text-xs font-mono text-slate-500 w-36 shrink-0 truncate" title={maHoaMeFor(g.meSo)}>{maHoaMeFor(g.meSo) || "—"}</span>
-              <div className="flex-1">
-                <select value={chotHuongValueFor(g.meSo)} onChange={(e) => setChotHuongByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
-                  className="w-full text-xs border border-slate-300 rounded px-2 py-1.5">
-                  {CHOT_HUONG_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                  <option value={KHAC_SENTINEL}>Khác (tự điền)</option>
-                </select>
-                {chotHuongValueFor(g.meSo) === KHAC_SENTINEL && (
-                  <input value={chotHuongCustomByMe[g.meSo] || ""} onChange={(e) => setChotHuongCustomByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
-                    placeholder="Tự nhập..." className="mt-1 w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
-                )}
-              </div>
-            </div>
-          ))}
+            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
         </div>
       </div>
+      <p className="text-[11px] text-slate-400">6 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: mỗi mẻ tự nối thêm C01, C02... tới mẻ cuối) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
 
       <div className="overflow-x-auto bg-white border border-slate-200 rounded-md">
         <table className="w-full text-[11px] whitespace-nowrap">
@@ -2581,7 +2556,15 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
                     </div>
                   </td>
                   {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-mono align-top">{maHoaMe}</td>}
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 align-top">{chotHuongFinalFor(g.meSo)}</td>}
+                  {ri === 0 && (
+                    <td rowSpan={g.items.length} className="px-1 py-1 align-top">
+                      <div className="flex items-start gap-0.5">
+                        <RowProcessSelect options={CHOT_HUONG_OPTIONS} value={chotHuongFinalFor(g.meSo)}
+                          onChange={(v) => setChotHuongByMe((p) => ({ ...p, [g.meSo]: v }))} />
+                        {chotHuongIsOverridden(g.meSo) && <button onClick={() => clearChotHuongForMe(g.meSo)} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ));
             })}
