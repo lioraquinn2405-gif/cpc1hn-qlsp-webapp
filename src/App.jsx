@@ -2405,7 +2405,10 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
   // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode).
   const [maHoaMeBase, setMaHoaMeBase] = useState("");
-  // Chốt hướng chọn riêng theo từng mẻ (mỗi mẻ có thể hoàn thiện theo hướng khác nhau).
+  // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), mẻ nào chọn riêng
+  // (chotHuongByMe có key) thì ghi đè, mẻ nào chưa đụng tới vẫn tự theo ô mặc định khi ô mặc định đổi.
+  const [chotHuongDefault, setChotHuongDefault] = useState(CHOT_HUONG_OPTIONS[0]);
+  const [chotHuongDefaultCustom, setChotHuongDefaultCustom] = useState("");
   const [chotHuongByMe, setChotHuongByMe] = useState({});
   const [chotHuongCustomByMe, setChotHuongCustomByMe] = useState({});
   // 4 trường xử lý BTP mặc định ĐỒNG BỘ theo giá trị chung ở trên cho MỌI lô — nhưng 1 vài lô có
@@ -2416,9 +2419,11 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const sauDongOngFinal = sauDongOng === KHAC_SENTINEL ? sauDongOngCustom : sauDongOng;
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
   const maHoaMeFor = (meSo) => deriveMaHoaMe(maHoaMeBase, meSo);
-  const chotHuongValueFor = (meSo) => chotHuongByMe[meSo] ?? CHOT_HUONG_OPTIONS[0];
+  const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
+  const chotHuongValueFor = (meSo) => chotHuongByMe[meSo] ?? chotHuongDefault;
   const chotHuongFinalFor = (meSo) => {
-    const v = chotHuongValueFor(meSo);
+    if (chotHuongByMe[meSo] === undefined) return chotHuongDefaultFinal;
+    const v = chotHuongByMe[meSo];
     return v === KHAC_SENTINEL ? (chotHuongCustomByMe[meSo] || "") : v;
   };
   const rowValue = (rowKey, field, globalValue) => rowOverrides[rowKey]?.[field] ?? globalValue;
@@ -2495,8 +2500,10 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
           value={sauDongOng} onChange={setSauDongOng} custom={sauDongOngCustom} onCustomChange={setSauDongOngCustom} />
         <ProcessSelect label="Quy trình xử lý khác nếu có" options={QUY_TRINH_KHAC_OPTIONS}
           value={quyTrinhKhac} onChange={setQuyTrinhKhac} custom={quyTrinhKhacCustom} onCustomChange={setQuyTrinhKhacCustom} />
+        <ProcessSelect label="Chốt hướng xử lý hoàn thiện" options={CHOT_HUONG_OPTIONS}
+          value={chotHuongDefault} onChange={setChotHuongDefault} custom={chotHuongDefaultCustom} onCustomChange={setChotHuongDefaultCustom} />
       </div>
-      <p className="text-[11px] text-slate-400">4 ô trên áp dụng mặc định cho mọi lô bên dưới — lô nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô còn lại.</p>
+      <p className="text-[11px] text-slate-400">5 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
 
       <div className="bg-white border border-slate-200 rounded-md p-2.5">
         <div className="mb-2">
