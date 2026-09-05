@@ -2403,8 +2403,10 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [sauDongOngCustom, setSauDongOngCustom] = useState("");
   const [quyTrinhKhac, setQuyTrinhKhac] = useState(QUY_TRINH_KHAC_OPTIONS[0]);
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
-  // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode).
+  // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode). Mẻ nào
+  // cần mã khác quy tắc tự tăng thì sửa riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
   const [maHoaMeBase, setMaHoaMeBase] = useState("");
+  const [maHoaMeByMe, setMaHoaMeByMe] = useState({});
   // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
   // trong bảng (cột "Chốt hướng xử lý hoàn thiện", giống cách 4 cột xử lý BTP kia đang làm) — mẻ
   // nào chưa sửa riêng (chotHuongByMe không có key) vẫn tự theo ô mặc định khi ô mặc định đổi.
@@ -2418,7 +2420,9 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
 
   const sauDongOngFinal = sauDongOng === KHAC_SENTINEL ? sauDongOngCustom : sauDongOng;
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
-  const maHoaMeFor = (meSo) => deriveMaHoaMe(maHoaMeBase, meSo);
+  const maHoaMeFor = (meSo) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaMeBase, meSo);
+  const maHoaMeIsOverridden = (meSo) => maHoaMeByMe[meSo] !== undefined;
+  const clearMaHoaMeForMe = (meSo) => setMaHoaMeByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
   const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
   const chotHuongFinalFor = (meSo) => chotHuongByMe[meSo] ?? chotHuongDefaultFinal;
   const chotHuongIsOverridden = (meSo) => chotHuongByMe[meSo] !== undefined;
@@ -2555,7 +2559,15 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
                       {isOverridden(r.key, "quyTrinhKhac") && <button onClick={() => clearRowValue(r.key, "quyTrinhKhac")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
                     </div>
                   </td>
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-mono align-top">{maHoaMe}</td>}
+                  {ri === 0 && (
+                    <td rowSpan={g.items.length} className="px-1 py-1 align-top">
+                      <div className="flex items-start gap-0.5">
+                        <input value={maHoaMe} onChange={(e) => setMaHoaMeByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
+                          className={`w-full font-mono text-[11px] border rounded px-1 py-1 ${maHoaMeIsOverridden(g.meSo) ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
+                        {maHoaMeIsOverridden(g.meSo) && <button onClick={() => clearMaHoaMeForMe(g.meSo)} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                      </div>
+                    </td>
+                  )}
                   {ri === 0 && (
                     <td rowSpan={g.items.length} className="px-1 py-1 align-top">
                       <div className="flex items-start gap-0.5">
