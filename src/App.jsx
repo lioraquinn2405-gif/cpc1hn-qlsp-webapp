@@ -588,15 +588,23 @@ function Connected({ session, profile }) {
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
     }
-    // MĐ SH (mật độ SAU HẤP) = MĐ nhãn × Bào tử % — hấp tiệt trùng chỉ bào tử sống sót nên
-    // đo lại từ đầu là dư thừa, tính thẳng từ 2 số QC đã có. Sửa MĐ nhãn hoặc Bào tử % thì
-    // tự tính lại MĐ SH; vẫn cho sửa tay MĐ SH riêng nếu cần ghi đè (vd đo thực tế khác biệt).
-    if (field === "mdNhan" || field === "tyLeBaoTu") {
+    // 3 số MĐ nhãn / MĐ SH (mật độ SAU HẤP) / Bào tử % luôn khớp công thức MĐ SH = MĐ nhãn ×
+    // Bào tử % ⟺ Bào tử % = MĐ SH / MĐ nhãn × 100 — chỉ cần QC nhập ĐÚNG 2/3 số, số còn lại tự
+    // tính. Ưu tiên: có đủ MĐ nhãn + MĐ SH (2 số đo thật) thì Bào tử % LUÔN suy ra từ đó (khoá,
+    // không cho gõ tay nữa — xem ô Bào tử % trong bảng, chỉ mở khoá lại nếu xoá bớt 1 trong 2 ô
+    // kia). Chưa đủ MĐ SH thì vẫn cho gõ tay Bào tử % để tự tính MĐ SH như trước đây (hấp tiệt
+    // trùng chỉ bào tử sống sót nên đo lại MĐ SH từ đầu là dư thừa, tính thẳng từ 2 số đã có).
+    if (field === "mdNhan" || field === "mdSH" || field === "tyLeBaoTu") {
       const row = materials.find((r) => r.id === id);
       const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
-      const tyLeBaoTu = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
-      const mdSH = mdNhan != null && tyLeBaoTu != null ? Math.round(mdNhan * tyLeBaoTu / 100 * 100) / 100 : row?.mdSH;
-      const patch = { [field]: value, mdSH };
+      const mdSH = field === "mdSH" ? value : row?.mdSH;
+      const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
+      const patch = { [field]: value };
+      if (mdNhan != null && mdSH != null) {
+        patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
+      } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
+        patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
+      }
       setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
@@ -1676,7 +1684,13 @@ function MaterialGroupTable({
                       <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)}</td>
                     ) : (
                       <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":st.needsBaoTu?"bg-amber-50":""}`}>
-                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
+                        {r.mdNhan != null && r.mdSH != null ? (
+                          <input value={groupNum(r.tyLeBaoTu)} disabled
+                            title="Tự tính từ MĐ SH / MĐ nhãn × 100% — xoá bớt 1 trong 2 ô đó nếu cần sửa tay"
+                            className="w-16 text-xs border border-slate-200 rounded px-1.5 py-1 text-right bg-slate-100 text-slate-500" />
+                        ) : (
+                          <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
+                        )}
                       </SelectableTd>
                     )}
                     {roQcFields ? (
