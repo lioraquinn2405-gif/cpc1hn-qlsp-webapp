@@ -588,15 +588,25 @@ function Connected({ session, profile }) {
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
     }
-    // MĐ SH (mật độ SAU HẤP) = MĐ nhãn × Bào tử % — hấp tiệt trùng chỉ bào tử sống sót nên
-    // đo lại từ đầu là dư thừa, tính thẳng từ 2 số QC đã có. Sửa MĐ nhãn hoặc Bào tử % thì
-    // tự tính lại MĐ SH; vẫn cho sửa tay MĐ SH riêng nếu cần ghi đè (vd đo thực tế khác biệt).
-    if (field === "mdNhan" || field === "tyLeBaoTu") {
+    // 3 số MĐ nhãn / MĐ SH (mật độ SAU HẤP) / Bào tử % luôn khớp công thức MĐ SH = MĐ nhãn ×
+    // Bào tử % ⟺ Bào tử % = MĐ SH / MĐ nhãn × 100 ⟺ MĐ nhãn = MĐ SH / Bào tử % × 100 — QC chỉ cần
+    // nhập ĐÚNG 2/3 số, số còn lại tự tính. Ô đang gõ tay LUÔN lưu đúng giá trị vừa gõ (không bao
+    // giờ tự ghi đè lại) — CHỈ tính lại 1 trong 2 ô KIA theo đúng công thức: sửa MĐ nhãn hoặc MĐ SH
+    // thì Bào tử % tự tính lại (không tự đổi MĐ nhãn/MĐ SH kia); sửa Bào tử % thì MĐ SH tự tính lại
+    // theo MĐ nhãn hiện có (giữ nguyên MĐ nhãn, khớp cách tính cũ trước khi thêm chiều thứ 3).
+    if (field === "mdNhan" || field === "mdSH" || field === "tyLeBaoTu") {
       const row = materials.find((r) => r.id === id);
       const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
-      const tyLeBaoTu = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
-      const mdSH = mdNhan != null && tyLeBaoTu != null ? Math.round(mdNhan * tyLeBaoTu / 100 * 100) / 100 : row?.mdSH;
-      const patch = { [field]: value, mdSH };
+      const mdSH = field === "mdSH" ? value : row?.mdSH;
+      const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
+      const patch = { [field]: value };
+      if (field !== "tyLeBaoTu" && mdNhan != null && mdSH != null) {
+        patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
+      } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
+        patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
+      } else if (field !== "mdNhan" && mdSH != null && tyLeBaoTuInput != null) {
+        patch.mdNhan = tyLeBaoTuInput !== 0 ? Math.round((mdSH / tyLeBaoTuInput) * 100 * 100) / 100 : null;
+      }
       setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
@@ -1228,6 +1238,37 @@ const groupNum = (n) => (n == null || n === "" ? "" : Number(n).toLocaleString("
 // gì), input chỉ hiện bản có chấm; gõ ký tự nào không phải số thì tự bỏ qua luôn.
 const digitsOnly = (s) => String(s || "").replace(/\D/g, "");
 const groupIntStr = (s) => { const d = digitsOnly(s); return d ? Number(d).toLocaleString("vi-VN") : ""; };
+// Ô số nguyên có chấm hàng nghìn nhưng vẫn sửa được đúng kiểu bình thường (xoá 1 chữ số giữa
+// chuỗi rồi gõ số khác vào đúng chỗ đó, không bị bật con trỏ về cuối) — value là chuỗi số thô
+// (không dấu chấm, giữ nguyên cho chỗ khác dùng num()/parseInt), onChange trả về số thô mới.
+// Cách làm: đếm xem trước vị trí con trỏ có bao nhiêu CHỮ SỐ (bỏ qua dấu chấm) ngay sau khi
+// trình duyệt đã áp thao tác sửa, format lại toàn chuỗi, rồi đặt lại con trỏ ngay sau đúng số
+// chữ số đó trong chuỗi mới — ghi thẳng vào DOM (el.value/setSelectionRange) TRƯỚC khi gọi
+// onChange (kích hoạt re-render từ state cha) để khỏi bị nháy/giật lúc React vẽ lại.
+function GroupedIntInput({ value, onChange, placeholder, className }) {
+  const handleChange = (e) => {
+    const el = e.target;
+    const raw = el.value;
+    const caret = el.selectionStart ?? raw.length;
+    const digitsBeforeCaret = (raw.slice(0, caret).match(/\d/g) || []).length;
+    const digits = digitsOnly(raw);
+    const formatted = digits ? Number(digits).toLocaleString("vi-VN") : "";
+    let pos = formatted.length;
+    if (digitsBeforeCaret === 0) {
+      pos = 0;
+    } else {
+      let count = 0;
+      for (let i = 0; i < formatted.length; i++) {
+        if (/\d/.test(formatted[i])) count++;
+        if (count === digitsBeforeCaret) { pos = i + 1; break; }
+      }
+    }
+    el.value = formatted;
+    el.setSelectionRange(pos, pos);
+    onChange(digits);
+  };
+  return <input value={groupIntStr(value)} onChange={handleChange} placeholder={placeholder} inputMode="numeric" className={className} />;
+}
 function EditNum({ v, on, w = "w-16" }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
@@ -2176,6 +2217,23 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
     finally { setBusyKey(null); }
   };
 
+  // Bỏ 1 LẦN tất cả các mẻ còn Chờ SX của CÙNG 1 nhịp sản xuất — gộp hết rows của mọi mẻ vào 1 lần
+  // gọi revertChoSXGroup (đúng hơn là lặp lại cancelMe từng mẻ: nếu 2 mẻ lỡ cùng tách ra từ 1 lô gốc,
+  // gộp chung 1 lần mới ra ĐÚNG 1 dòng duy nhất — lặp riêng từng mẻ có thể bị lệch vì mỗi lần gọi vẫn
+  // dùng chung 1 bản chụp `allMaterials` cũ, không thấy được kết quả của lần gọi trước) — đỡ phải bấm
+  // "Bỏ mẻ này" thủ công từng mẻ khi cần huỷ nguyên cả nhịp (NCV phản hồi 2026-09).
+  const cancelAllMe = async (planId, meEntries, spTen) => {
+    const allRows = meEntries.flatMap(([, rows]) => rows);
+    if (!window.confirm(`Bỏ ý định pha TẤT CẢ ${meEntries.length} mẻ của nhịp sản xuất ${spTen || ""}? NL sẽ trả về "Chờ pha" để tính vào kế hoạch khác.`)) return;
+    const key = `all-${planId}`;
+    setBusyKey(key);
+    try {
+      await revertChoSXGroup(allRows, allMaterials, actorId);
+      setNote(`Đã bỏ tất cả ${meEntries.length} mẻ của nhịp sản xuất ${spTen || ""} — NL trả về Chờ pha.`);
+    } catch (err) { setNote(`Lỗi bỏ tất cả mẻ: ${err.message}`); }
+    finally { setBusyKey(null); }
+  };
+
   if (!groups.length) {
     return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Chưa có NL nào đang chờ SX — NL sẽ tự chuyển sang đây sau khi 1 kế hoạch mẻ pha ở tab "Pha chế SX" được DUYỆT.</div>;
   }
@@ -2183,7 +2241,7 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500 flex items-center gap-1.5"><Factory className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Bấm "Xác nhận đã pha" đúng lúc mẻ đó thực sự đã pha xong; nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha".</p>
+        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Bấm "Xác nhận đã pha" đúng lúc mẻ đó thực sự đã pha xong; nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha" — hoặc bấm "Bỏ tất cả mẻ" ở đầu mỗi nhịp sản xuất nếu cần bỏ nguyên cả nhịp cùng lúc.</p>
       {groups.map(([planId, meEntries]) => {
         const allRows = meEntries.flatMap(([, rows]) => rows);
         const r0plan = allRows[0];
@@ -2199,10 +2257,19 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
               <div className="flex items-center justify-between px-1">
                 <span className="text-xs text-slate-400">Nhịp sản xuất {sp.tenSP} — {meEntries.length} mẻ đang Chờ SX</span>
                 {canEdit && (
-                  <button onClick={() => setExportPlanId(exportPlanId === planId ? null : planId)} title="Tạo bảng dữ liệu cả nhịp sản xuất để gửi mail"
-                    className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-800 border border-sky-200 hover:border-sky-300 rounded-md px-2 py-1.5 bg-white">
-                    <Mail className="w-3.5 h-3.5" /> Tạo thông tin gửi mail
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setExportPlanId(exportPlanId === planId ? null : planId)} title="Tạo bảng dữ liệu cả nhịp sản xuất để gửi mail"
+                      className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-800 border border-sky-200 hover:border-sky-300 rounded-md px-2 py-1.5 bg-white">
+                      <Mail className="w-3.5 h-3.5" /> Tạo thông tin gửi mail
+                    </button>
+                    {meEntries.length > 1 && (
+                      <button onClick={() => cancelAllMe(planId, meEntries, sp.tenSP)} disabled={busyKey != null}
+                        title="Bỏ ý định pha tất cả mẻ của nhịp sản xuất này, trả hết NL về Chờ pha"
+                        className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 bg-white disabled:opacity-40">
+                        <X className="w-3.5 h-3.5" /> Bỏ tất cả mẻ
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -2227,11 +2294,11 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
                     )}
                     {canEdit && (
                       <>
-                        <button onClick={() => confirmMe(key, rows)} disabled={busyKey === key}
+                        <button onClick={() => confirmMe(key, rows)} disabled={busyKey != null}
                           className="ml-auto flex items-center gap-1.5 bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
                           <CheckCircle2 className="w-3.5 h-3.5" /> Xác nhận đã pha
                         </button>
-                        <button onClick={() => cancelMe(key, rows)} disabled={busyKey === key} title="Bỏ mẻ này, trả NL về Chờ pha"
+                        <button onClick={() => cancelMe(key, rows)} disabled={busyKey != null} title="Bỏ mẻ này, trả NL về Chờ pha"
                           className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 disabled:opacity-40">
                           <X className="w-3.5 h-3.5" />
                         </button>
@@ -2346,11 +2413,16 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [sauDongOngCustom, setSauDongOngCustom] = useState("");
   const [quyTrinhKhac, setQuyTrinhKhac] = useState(QUY_TRINH_KHAC_OPTIONS[0]);
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
-  // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode).
+  // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode). Mẻ nào
+  // cần mã khác quy tắc tự tăng thì sửa riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
   const [maHoaMeBase, setMaHoaMeBase] = useState("");
-  // Chốt hướng chọn riêng theo từng mẻ (mỗi mẻ có thể hoàn thiện theo hướng khác nhau).
+  const [maHoaMeByMe, setMaHoaMeByMe] = useState({});
+  // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
+  // trong bảng (cột "Chốt hướng xử lý hoàn thiện", giống cách 4 cột xử lý BTP kia đang làm) — mẻ
+  // nào chưa sửa riêng (chotHuongByMe không có key) vẫn tự theo ô mặc định khi ô mặc định đổi.
+  const [chotHuongDefault, setChotHuongDefault] = useState(CHOT_HUONG_OPTIONS[0]);
+  const [chotHuongDefaultCustom, setChotHuongDefaultCustom] = useState("");
   const [chotHuongByMe, setChotHuongByMe] = useState({});
-  const [chotHuongCustomByMe, setChotHuongCustomByMe] = useState({});
   // 4 trường xử lý BTP mặc định ĐỒNG BỘ theo giá trị chung ở trên cho MỌI lô — nhưng 1 vài lô có
   // thể được tách ra test ở điều kiện khác, nên vẫn cho sửa riêng từng lô (ghi đè), không phụ thuộc
   // hoàn toàn vào ô chung phía trên. Ô nào CHƯA bị sửa riêng thì vẫn tự theo ô chung khi ô chung đổi.
@@ -2358,12 +2430,13 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
 
   const sauDongOngFinal = sauDongOng === KHAC_SENTINEL ? sauDongOngCustom : sauDongOng;
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
-  const maHoaMeFor = (meSo) => deriveMaHoaMe(maHoaMeBase, meSo);
-  const chotHuongValueFor = (meSo) => chotHuongByMe[meSo] ?? CHOT_HUONG_OPTIONS[0];
-  const chotHuongFinalFor = (meSo) => {
-    const v = chotHuongValueFor(meSo);
-    return v === KHAC_SENTINEL ? (chotHuongCustomByMe[meSo] || "") : v;
-  };
+  const maHoaMeFor = (meSo) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaMeBase, meSo);
+  const maHoaMeIsOverridden = (meSo) => maHoaMeByMe[meSo] !== undefined;
+  const clearMaHoaMeForMe = (meSo) => setMaHoaMeByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
+  const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
+  const chotHuongFinalFor = (meSo) => chotHuongByMe[meSo] ?? chotHuongDefaultFinal;
+  const chotHuongIsOverridden = (meSo) => chotHuongByMe[meSo] !== undefined;
+  const clearChotHuongForMe = (meSo) => setChotHuongByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
   const rowValue = (rowKey, field, globalValue) => rowOverrides[rowKey]?.[field] ?? globalValue;
   const setRowValue = (rowKey, field, val) => setRowOverrides((prev) => ({ ...prev, [rowKey]: { ...prev[rowKey], [field]: val } }));
   const clearRowValue = (rowKey, field) => setRowOverrides((prev) => {
@@ -2438,35 +2511,15 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
           value={sauDongOng} onChange={setSauDongOng} custom={sauDongOngCustom} onCustomChange={setSauDongOngCustom} />
         <ProcessSelect label="Quy trình xử lý khác nếu có" options={QUY_TRINH_KHAC_OPTIONS}
           value={quyTrinhKhac} onChange={setQuyTrinhKhac} custom={quyTrinhKhacCustom} onCustomChange={setQuyTrinhKhacCustom} />
-      </div>
-      <p className="text-[11px] text-slate-400">4 ô trên áp dụng mặc định cho mọi lô bên dưới — lô nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô còn lại.</p>
-
-      <div className="bg-white border border-slate-200 rounded-md p-2.5">
-        <div className="mb-2">
-          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ (phần đầu, không kèm "C01") — mỗi mẻ tự nối C01, C02... tới mẻ cuối</label>
+        <ProcessSelect label="Chốt hướng xử lý hoàn thiện" options={CHOT_HUONG_OPTIONS}
+          value={chotHuongDefault} onChange={setChotHuongDefault} custom={chotHuongDefaultCustom} onCustomChange={setChotHuongDefaultCustom} />
+        <div>
+          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ (phần đầu, không kèm "C01")</label>
           <input value={maHoaMeBase} onChange={(e) => setMaHoaMeBase(e.target.value)} placeholder="vd CB010526"
-            className="w-full sm:w-64 text-xs border border-slate-300 rounded px-2 py-1.5" />
-        </div>
-        <div className="space-y-1.5">
-          {batchGroups.map((g) => (
-            <div key={g.meSo} className="flex items-center gap-2">
-              <span className="text-xs font-medium w-14 shrink-0">Mẻ {g.meSo}</span>
-              <span className="text-xs font-mono text-slate-500 w-36 shrink-0 truncate" title={maHoaMeFor(g.meSo)}>{maHoaMeFor(g.meSo) || "—"}</span>
-              <div className="flex-1">
-                <select value={chotHuongValueFor(g.meSo)} onChange={(e) => setChotHuongByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
-                  className="w-full text-xs border border-slate-300 rounded px-2 py-1.5">
-                  {CHOT_HUONG_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                  <option value={KHAC_SENTINEL}>Khác (tự điền)</option>
-                </select>
-                {chotHuongValueFor(g.meSo) === KHAC_SENTINEL && (
-                  <input value={chotHuongCustomByMe[g.meSo] || ""} onChange={(e) => setChotHuongCustomByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
-                    placeholder="Tự nhập..." className="mt-1 w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
-                )}
-              </div>
-            </div>
-          ))}
+            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
         </div>
       </div>
+      <p className="text-[11px] text-slate-400">6 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: mỗi mẻ tự nối thêm C01, C02... tới mẻ cuối) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
 
       <div className="overflow-x-auto bg-white border border-slate-200 rounded-md">
         <table className="w-full text-[11px] whitespace-nowrap">
@@ -2516,8 +2569,24 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
                       {isOverridden(r.key, "quyTrinhKhac") && <button onClick={() => clearRowValue(r.key, "quyTrinhKhac")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
                     </div>
                   </td>
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-mono align-top">{maHoaMe}</td>}
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 align-top">{chotHuongFinalFor(g.meSo)}</td>}
+                  {ri === 0 && (
+                    <td rowSpan={g.items.length} className="px-1 py-1 align-top">
+                      <div className="flex items-start gap-0.5">
+                        <input value={maHoaMe} onChange={(e) => setMaHoaMeByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
+                          className={`w-full font-mono text-[11px] border rounded px-1 py-1 ${maHoaMeIsOverridden(g.meSo) ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
+                        {maHoaMeIsOverridden(g.meSo) && <button onClick={() => clearMaHoaMeForMe(g.meSo)} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                      </div>
+                    </td>
+                  )}
+                  {ri === 0 && (
+                    <td rowSpan={g.items.length} className="px-1 py-1 align-top">
+                      <div className="flex items-start gap-0.5">
+                        <RowProcessSelect options={CHOT_HUONG_OPTIONS} value={chotHuongFinalFor(g.meSo)}
+                          onChange={(v) => setChotHuongByMe((p) => ({ ...p, [g.meSo]: v }))} />
+                        {chotHuongIsOverridden(g.meSo) && <button onClick={() => clearChotHuongForMe(g.meSo)} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ));
             })}
@@ -2721,7 +2790,10 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   // nhau.
   const presenceLabel = userLabel ? `${userLabel} (${role})` : null;
   const others = usePresence(role === "rd" && sp ? `ke-hoach-rd:${sp.maSP}` : null, actorId, presenceLabel);
-  const [nInput, setNInput] = useState(sp?.soOngNhip ? String(sp.soOngNhip) : "");
+  // Số ống cần cho nhịp này KHÔNG tự điền theo mặc định của sản phẩm (khác Hàm lượng đích) —
+  // giá trị này đổi theo từng nhịp pha thực tế, tự điền sẵn chỉ khiến NCV phải xoá đi trước
+  // khi gõ số thật (chốt với NCV 2026-09).
+  const [nInput, setNInput] = useState("");
   const [gInput, setGInput] = useState(sp?.hamLuong ? String(sp.hamLuong) : "");
   const [gInput2, setGInput2] = useState(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
   // "Pha tròn chai NL" — chỉ áp dụng SP 1 thành phần (chốt NCV 2026-08-10): mỗi lô = đúng 1 mẻ
@@ -2754,7 +2826,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   const [aiError, setAiError] = useState("");
 
   useEffect(() => {
-    setNInput(sp?.soOngNhip ? String(sp.soOngNhip) : "");
+    setNInput("");
     setGInput(sp?.hamLuong ? String(sp.hamLuong) : "");
     setGInput2(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
     setWholeBottleOnly(false);
@@ -3121,7 +3193,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           </div>
           <div>
             <label className="text-xs text-slate-500">Số ống cần cho nhịp này</label>
-            <input value={groupIntStr(nInput)} onChange={(e) => setNInput(digitsOnly(e.target.value))} placeholder="vd 120.000"
+            <GroupedIntInput value={nInput} onChange={setNInput} placeholder="vd 120.000"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-40" />
           </div>
           <div>
