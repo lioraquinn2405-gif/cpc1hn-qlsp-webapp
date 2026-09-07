@@ -589,11 +589,11 @@ function Connected({ session, profile }) {
       return;
     }
     // 3 số MĐ nhãn / MĐ SH (mật độ SAU HẤP) / Bào tử % luôn khớp công thức MĐ SH = MĐ nhãn ×
-    // Bào tử % ⟺ Bào tử % = MĐ SH / MĐ nhãn × 100 — chỉ cần QC nhập ĐÚNG 2/3 số, số còn lại tự
-    // tính. Ưu tiên: có đủ MĐ nhãn + MĐ SH (2 số đo thật) thì Bào tử % LUÔN suy ra từ đó (khoá,
-    // không cho gõ tay nữa — xem ô Bào tử % trong bảng, chỉ mở khoá lại nếu xoá bớt 1 trong 2 ô
-    // kia). Chưa đủ MĐ SH thì vẫn cho gõ tay Bào tử % để tự tính MĐ SH như trước đây (hấp tiệt
-    // trùng chỉ bào tử sống sót nên đo lại MĐ SH từ đầu là dư thừa, tính thẳng từ 2 số đã có).
+    // Bào tử % ⟺ Bào tử % = MĐ SH / MĐ nhãn × 100 ⟺ MĐ nhãn = MĐ SH / Bào tử % × 100 — QC chỉ cần
+    // nhập ĐÚNG 2/3 số, số còn lại tự tính. Có đủ MĐ nhãn + MĐ SH (2 số đo thật) thì Bào tử % LUÔN
+    // suy ra từ đó và KHOÁ (xem ô Bào tử % trong bảng, không cho gõ tay nữa, chỉ mở khoá lại nếu
+    // xoá bớt 1 trong 2 ô kia) — còn MĐ SH/MĐ nhãn tự tính từ 2 số kia thì vẫn cho sửa tay riêng
+    // (không khoá) nếu cần ghi đè, vì đó là 2 số có thể có sai số đo/spec thực tế khác biệt.
     if (field === "mdNhan" || field === "mdSH" || field === "tyLeBaoTu") {
       const row = materials.find((r) => r.id === id);
       const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
@@ -604,6 +604,8 @@ function Connected({ session, profile }) {
         patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
       } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
         patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
+      } else if (field !== "mdNhan" && mdSH != null && tyLeBaoTuInput != null) {
+        patch.mdNhan = tyLeBaoTuInput !== 0 ? Math.round((mdSH / tyLeBaoTuInput) * 100 * 100) / 100 : null;
       }
       setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
