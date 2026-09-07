@@ -1280,7 +1280,7 @@ function GroupedIntInput({ value, onChange, placeholder, className }) {
   };
   return <input value={groupIntStr(value)} onChange={handleChange} placeholder={placeholder} inputMode="numeric" className={className} />;
 }
-function EditNum({ v, on, w = "w-16" }) {
+function EditNum({ v, on, w = "w-16", commitOnBlur }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
   // không gõ tiếp được số thập phân.
@@ -1291,6 +1291,18 @@ function EditNum({ v, on, w = "w-16" }) {
   // Chỉ đồng bộ lại từ v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi blur).
   const focusedRef = useRef(false);
   useEffect(() => { if (!focusedRef.current) setText(groupNum(v)); }, [v]);
+  // commitOnBlur: dùng cho MĐ nhãn/MĐ SH/Bào tử % — 3 ô này còn tự tính chéo lẫn nhau (xem
+  // editField) và MĐ SH+Bào tử % còn quyết định lô có đủ điều kiện chuyển "Chờ pha" hay không.
+  // Lưu theo TỪNG KÝ TỰ như mặc định (vd gõ "4" của "4.52") có thể vừa đủ để tự tính xong số thứ
+  // 3 NGAY GIỮA LÚC ĐANG GÕ, lô lập tức rớt khỏi "Chờ pha"/"Chờ KQKN" đang lọc theo trạng thái —
+  // dòng biến mất khỏi bảng ngay trước mắt NCV dù chưa gõ xong (NCV phản hồi 2026-09: "đang nhập
+  // số mà nó cứ tự nhảy đi luôn"). Chỉ lưu lúc rời ô (đã gõ xong hẳn) để tránh trạng thái đổi giữa
+  // chừng.
+  const commit = () => {
+    if (text.trim() === "") { on(null); return; }
+    const n = num(text);
+    if (n != null) on(n);
+  };
   return (
     <input
       value={text}
@@ -1299,11 +1311,16 @@ function EditNum({ v, on, w = "w-16" }) {
       onChange={(e) => {
         const raw = e.target.value;
         setText(raw);
+        if (commitOnBlur) return;
         if (raw.trim() === "") { on(null); return; }
         const n = num(raw);
         if (n != null) on(n);
       }}
-      onBlur={() => { focusedRef.current = false; setText(groupNum(v)); }}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (commitOnBlur) { commit(); return; }
+        setText(groupNum(v));
+      }}
       className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 text-right focus:outline-none focus:ring-1 focus:ring-emerald-400`}
     />
   );
@@ -1683,21 +1700,21 @@ function MaterialGroupTable({
                       <td className="px-2 py-1 text-right">{fmt(r.mdNhan)}</td>
                     ) : (
                       <SelectableTd {...cellProps("mdNhan")} className="px-2 py-1 text-right">
-                        <EditNum v={r.mdNhan} on={(x)=>onEdit(r.id,"mdNhan",x)} />
+                        <EditNum v={r.mdNhan} on={(x)=>onEdit(r.id,"mdNhan",x)} commitOnBlur />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
                       <td className="px-2 py-1 text-right">{r.mdSH==null?<span className="text-slate-300">thiếu</span>:fmt(r.mdSH)}</td>
                     ) : (
                       <SelectableTd {...cellProps("mdSH")} className={`px-2 py-1 text-right ${st.needsMdSH?"bg-amber-50":""}`}>
-                        <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} />
+                        <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} commitOnBlur />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
                       <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)}</td>
                     ) : (
                       <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":st.needsBaoTu?"bg-amber-50":""}`}>
-                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
+                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} commitOnBlur />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
