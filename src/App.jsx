@@ -590,17 +590,17 @@ function Connected({ session, profile }) {
     }
     // 3 số MĐ nhãn / MĐ SH (mật độ SAU HẤP) / Bào tử % luôn khớp công thức MĐ SH = MĐ nhãn ×
     // Bào tử % ⟺ Bào tử % = MĐ SH / MĐ nhãn × 100 ⟺ MĐ nhãn = MĐ SH / Bào tử % × 100 — QC chỉ cần
-    // nhập ĐÚNG 2/3 số, số còn lại tự tính. Có đủ MĐ nhãn + MĐ SH (2 số đo thật) thì Bào tử % LUÔN
-    // suy ra từ đó và KHOÁ (xem ô Bào tử % trong bảng, không cho gõ tay nữa, chỉ mở khoá lại nếu
-    // xoá bớt 1 trong 2 ô kia) — còn MĐ SH/MĐ nhãn tự tính từ 2 số kia thì vẫn cho sửa tay riêng
-    // (không khoá) nếu cần ghi đè, vì đó là 2 số có thể có sai số đo/spec thực tế khác biệt.
+    // nhập ĐÚNG 2/3 số, số còn lại tự tính. Ô đang gõ tay LUÔN lưu đúng giá trị vừa gõ (không bao
+    // giờ tự ghi đè lại) — CHỈ tính lại 1 trong 2 ô KIA theo đúng công thức: sửa MĐ nhãn hoặc MĐ SH
+    // thì Bào tử % tự tính lại (không tự đổi MĐ nhãn/MĐ SH kia); sửa Bào tử % thì MĐ SH tự tính lại
+    // theo MĐ nhãn hiện có (giữ nguyên MĐ nhãn, khớp cách tính cũ trước khi thêm chiều thứ 3).
     if (field === "mdNhan" || field === "mdSH" || field === "tyLeBaoTu") {
       const row = materials.find((r) => r.id === id);
       const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
       const mdSH = field === "mdSH" ? value : row?.mdSH;
       const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
       const patch = { [field]: value };
-      if (mdNhan != null && mdSH != null) {
+      if (field !== "tyLeBaoTu" && mdNhan != null && mdSH != null) {
         patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
       } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
         patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
@@ -1686,13 +1686,7 @@ function MaterialGroupTable({
                       <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)}</td>
                     ) : (
                       <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":st.needsBaoTu?"bg-amber-50":""}`}>
-                        {r.mdNhan != null && r.mdSH != null ? (
-                          <input value={groupNum(r.tyLeBaoTu)} disabled
-                            title="Tự tính từ MĐ SH / MĐ nhãn × 100% — xoá bớt 1 trong 2 ô đó nếu cần sửa tay"
-                            className="w-16 text-xs border border-slate-200 rounded px-1.5 py-1 text-right bg-slate-100 text-slate-500" />
-                        ) : (
-                          <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
-                        )}
+                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
