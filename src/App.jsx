@@ -595,25 +595,36 @@ function Connected({ session, profile }) {
     // thì Bào tử % tự tính lại (không tự đổi MĐ nhãn/MĐ SH kia); sửa Bào tử % thì MĐ SH tự tính lại
     // theo MĐ nhãn hiện có (giữ nguyên MĐ nhãn, khớp cách tính cũ trước khi thêm chiều thứ 3).
     if (field === "mdNhan" || field === "mdSH" || field === "tyLeBaoTu") {
-      const row = materials.find((r) => r.id === id);
-      const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
-      const mdSH = field === "mdSH" ? value : row?.mdSH;
-      const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
-      const patch = { [field]: value };
-      if (field !== "tyLeBaoTu" && mdNhan != null && mdSH != null) {
-        patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
-      } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
-        patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
-      } else if (field !== "mdNhan" && mdSH != null && tyLeBaoTuInput != null) {
-        patch.mdNhan = tyLeBaoTuInput !== 0 ? Math.round((mdSH / tyLeBaoTuInput) * 100 * 100) / 100 : null;
-      }
-      setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+      // Đọc dữ liệu dòng (để lấy 2 số kia) từ `prev` NGAY BÊN TRONG setMaterials thay vì biến
+      // `materials` ngoài closure — bắt buộc khi dán/kéo điền nhiều ô CÙNG 1 dòng cùng lúc (vd
+      // MĐ nhãn + MĐ SH), các lệnh gọi editField() chạy liên tiếp trước khi React kịp render lại,
+      // nên đọc `materials` ngoài sẽ luôn thấy bản CŨ (chưa có ô vừa lưu trước đó) — cả 2 lệnh
+      // tưởng chỉ có 1/3 số, không tự tính được số còn lại (bug thật gặp lúc dán 2 ô liền nhau).
+      // `prev` trong setMaterials luôn là bản MỚI NHẤT dù gọi liên tiếp nhiều lần không cần đợi
+      // render. Tính patch NGAY TRONG updater (thuần, không side-effect) rồi mới gọi API lưu ở
+      // ngoài — tránh gọi API 2 lần nếu StrictMode gọi lại updater.
+      let patch;
+      setMaterials((prev) => {
+        const row = prev.find((r) => r.id === id);
+        const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
+        const mdSH = field === "mdSH" ? value : row?.mdSH;
+        const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
+        patch = { [field]: value };
+        if (field !== "tyLeBaoTu" && mdNhan != null && mdSH != null) {
+          patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
+        } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
+          patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
+        } else if (field !== "mdNhan" && mdSH != null && tyLeBaoTuInput != null) {
+          patch.mdNhan = tyLeBaoTuInput !== 0 ? Math.round((mdSH / tyLeBaoTuInput) * 100 * 100) / 100 : null;
+        }
+        return prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r));
+      });
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
     }
     setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value, updatedBy: actorId } : r)));
     updateMaterialField(id, field, value, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
-  }, [actorId, materials]);
+  }, [actorId]);
   const removeRec = (id) => {
     setMaterials((prev) => prev.filter((r) => r.id !== id));
     removeMaterial(id).catch((err) => setNote(`Lỗi xoá: ${err.message}`));
