@@ -529,7 +529,16 @@ function Connected({ session, profile }) {
   const canEditProduction = isAdmin || profile.role === "rd";
   const canPreviewPlan = isAdmin || profile.role === "rd" || profile.role === "kh";
 
+  // Mỗi lần Realtime báo có thay đổi (kể cả do CHÍNH client này vừa ghi) là gọi reload() tải lại
+  // TOÀN BỘ bảng — dán nhiều ô 1 lúc (doPaste) ghi lên Supabase riêng từng ô, mỗi lần ghi kích hoạt
+  // 1 lần reload() CHẠY SONG SONG với nhau; nếu 1 lần gọi TRƯỚC (dữ liệu cũ hơn) lại có phản hồi VỀ
+  // SAU (do độ trễ mạng khác nhau), nó sẽ setMaterials() đè lên state đã mới hơn, làm "mất" đúng các
+  // ô vừa dán/sửa (NCV phản hồi 2026-09: "paste dữ liệu mà nó cứ bị back về dữ liệu cũ"). Đánh số
+  // thứ tự mỗi lần GỌI reload(), chỉ cho phép lần gọi MỚI NHẤT được áp kết quả — phản hồi muộn của
+  // các lần gọi cũ hơn bị bỏ qua dù về sau, tránh ghi đè ngược.
+  const reloadSeqRef = useRef(0);
   const reload = useCallback(async () => {
+    const seq = ++reloadSeqRef.current;
     try {
       const [m, p, pr] = await Promise.all([fetchMaterials(), fetchProducts(), fetchProfiles()]);
       const cutoff = Date.now() - TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -558,13 +567,14 @@ function Connected({ session, profile }) {
         mAfterTrash = mAfterTrash.map((r) => (choSxExpiredIds.has(r.id) ? { ...r, daPha: true } : r));
       }
 
+      if (seq !== reloadSeqRef.current) return; // đã có lần gọi reload() mới hơn — kết quả này cũ, bỏ qua
       setMaterials(mAfterTrash);
       setProducts(p);
       setProfiles(pr);
     } catch (err) {
-      setNote(`Lỗi tải dữ liệu: ${err.message}`);
+      if (seq === reloadSeqRef.current) setNote(`Lỗi tải dữ liệu: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (seq === reloadSeqRef.current) setLoading(false);
     }
   }, []);
 
@@ -787,7 +797,7 @@ function Connected({ session, profile }) {
       {mobileNavOpen && (
         <div className="fixed inset-0 bg-black/40 z-30 sm:hidden" onClick={() => setMobileNavOpen(false)} />
       )}
-      <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin}
+      <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin} isQC={isQC}
         strainFilter={strainFilter} setStrainFilter={setStrainFilter}
         onOpenHistoryAll={() => { setSpFocus(null); setTab("sp-history"); }}
         mobileOpen={mobileNavOpen} />
@@ -855,9 +865,12 @@ function Connected({ session, profile }) {
 }
 
 /* ---------------- Sidebar ---------------- */
-function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
+function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
   const displayEmail = userEmail;
-  const [nlOpen, setNlOpen] = useState(false);
+  // QC chỉ quan tâm mỗi "Quản lý NL" (phản hồi NCV 2026-09) — mở sẵn nhóm này ngay lúc vào web cho
+  // QC, khỏi phải tự bấm mở mỗi lần; các vai trò khác vẫn đóng sẵn như cũ (xem commit "đóng sẵn các
+  // nhóm menu khi mở web" 2026-08) vì họ dùng nhiều nhóm khác nhau, không có 1 nhóm cố định ưu tiên.
+  const [nlOpen, setNlOpen] = useState(() => isQC);
   const [phaOpen, setPhaOpen] = useState(false);
   const [spOpen, setSpOpen] = useState(false);
   const [lenMenOpen, setLenMenOpen] = useState(false);
@@ -1450,7 +1463,7 @@ function parsePasteValue(col, raw, row) {
  * cho các cột sửa được — CHỈ trong phạm vi lô này (không kéo/dán xuyên nhiều lô), vì mỗi lô là
  * 1 <table> HTML riêng. Vẫn gọi đúng `onEdit` sẵn có cho từng ô — không viết lại logic lưu. */
 function MaterialGroupTable({
-  groupKey, list, status, roGeneral, roQcFields, canRowAction, showReason, reasonLabel,
+  groupKey, list, status, roGeneral, roQcFields, allowQcOverride, canRowAction, showReason, reasonLabel,
   onEdit, onRemove, onSoftDelete, onRestore, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy,
   nameOf, setNote,
 }) {
@@ -1645,7 +1658,7 @@ function MaterialGroupTable({
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-white text-slate-400 border-b border-slate-100 text-left">
               <tr>
-                {["STT","Số lô","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
+                {[allowQcOverride ? "Sửa" : "","Số lô","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
                   h ? <th key={i} className="px-3 py-2 font-medium">{h}</th> : null)}
                 <th className="px-2"></th>
               </tr>
@@ -1668,7 +1681,15 @@ function MaterialGroupTable({
                 return (
                   <tr key={r.id} title={qcPastDeadline ? `Đã quá hạn trả KQ QC (${st.qcDays} ngày kể từ thời gian thu)` : undefined}
                     className={`border-b border-slate-50 hover:bg-slate-50/60 ${qcRed ? "bg-red-200 hover:bg-red-200" : ""}`}>
-                    <td className="px-3 py-1.5 text-slate-400">{r.stt}</td>
+                    {allowQcOverride && (
+                      <td className="px-2 py-1.5">
+                        <button onClick={() => { if (window.confirm(`Chuyển số lô ${r.soLo} về "Chờ KQKN" để sửa lại kết quả? Cột Nhiễm khuẩn sẽ về "chưa QC" (các số liệu khác giữ nguyên), nhập lại đủ là tự quay về Chờ pha.`)) onEdit(r.id, "nhiemKhuan", ""); }}
+                          title="Chuyển dòng này về Chờ KQKN để sửa lại kết quả QC"
+                          className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-slate-100 text-slate-500 hover:bg-amber-100 hover:text-amber-700">
+                          Sửa
+                        </button>
+                      </td>
+                    )}
                     <td className="px-3 py-1.5 font-mono">{r.soLo || "–"}</td>
                     {roGeneral ? (
                       <td className="px-2 py-1 text-right">{fmt(r.vDich,1)}</td>
@@ -1929,6 +1950,12 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
   // quyền trong đúng tab này (chốt với NCV 2026-07-30, xem feedback_role_permissions).
   const roGeneral = ro || !canEditNL;
   const roQcFields = ro || (status === "cho-kqkn" ? !(canEditNL || canEditQcResults) : !canEditNL);
+  // QC thỉnh thoảng phát hiện nhập sai kết quả QC sau khi chai đã kịp chuyển sang Chờ pha (QC hết
+  // quyền sửa ở đây, chỉ admin mới sửa được — xem roQcFields) — cho QC tự bấm "Sửa" đẩy dòng đó
+  // quay lại Chờ KQKN (nơi QC vẫn có quyền sửa bình thường) để tự sửa, không cần nhờ admin (phản
+  // hồi NCV 2026-09). Xem nút "Sửa" trong MaterialGroupTable — xoá Nhiễm khuẩn về "chưa QC" là đủ
+  // để classify() tự xếp lại đúng Chờ KQKN; nhập đủ lại là tự quay về Chờ pha, không cần cờ riêng.
+  const allowQcOverride = status === "cho-pha" && !ro && !canEditNL && canEditQcResults;
   const canRowAction = canEditNL;
   const showReason = status === "cho-xu-ly" || status === "da-huy";
   const reasonLabel = status === "da-huy" ? "Lý do huỷ" : "Lý do chờ xử lý";
@@ -1976,7 +2003,7 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
     <div className="space-y-2">
       {groups.map(([key, list]) => (
         <MaterialGroupTable key={key} groupKey={key} list={list} status={status}
-          roGeneral={roGeneral} roQcFields={roQcFields} canRowAction={canRowAction}
+          roGeneral={roGeneral} roQcFields={roQcFields} allowQcOverride={allowQcOverride} canRowAction={canRowAction}
           showReason={showReason} reasonLabel={reasonLabel} nameOf={nameOf} setNote={setNote}
           onEdit={onEdit} onRemove={onRemove} onSoftDelete={onSoftDelete} onRestore={onRestore}
           onAddBottle={onAddBottle} onForceDaPha={onForceDaPha} onForceChoXuLy={onForceChoXuLy} onForceDaHuy={onForceDaHuy} />
