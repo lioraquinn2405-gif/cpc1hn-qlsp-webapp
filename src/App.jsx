@@ -529,7 +529,16 @@ function Connected({ session, profile }) {
   const canEditProduction = isAdmin || profile.role === "rd";
   const canPreviewPlan = isAdmin || profile.role === "rd" || profile.role === "kh";
 
+  // Mỗi lần Realtime báo có thay đổi (kể cả do CHÍNH client này vừa ghi) là gọi reload() tải lại
+  // TOÀN BỘ bảng — dán nhiều ô 1 lúc (doPaste) ghi lên Supabase riêng từng ô, mỗi lần ghi kích hoạt
+  // 1 lần reload() CHẠY SONG SONG với nhau; nếu 1 lần gọi TRƯỚC (dữ liệu cũ hơn) lại có phản hồi VỀ
+  // SAU (do độ trễ mạng khác nhau), nó sẽ setMaterials() đè lên state đã mới hơn, làm "mất" đúng các
+  // ô vừa dán/sửa (NCV phản hồi 2026-09: "paste dữ liệu mà nó cứ bị back về dữ liệu cũ"). Đánh số
+  // thứ tự mỗi lần GỌI reload(), chỉ cho phép lần gọi MỚI NHẤT được áp kết quả — phản hồi muộn của
+  // các lần gọi cũ hơn bị bỏ qua dù về sau, tránh ghi đè ngược.
+  const reloadSeqRef = useRef(0);
   const reload = useCallback(async () => {
+    const seq = ++reloadSeqRef.current;
     try {
       const [m, p, pr] = await Promise.all([fetchMaterials(), fetchProducts(), fetchProfiles()]);
       const cutoff = Date.now() - TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -558,13 +567,14 @@ function Connected({ session, profile }) {
         mAfterTrash = mAfterTrash.map((r) => (choSxExpiredIds.has(r.id) ? { ...r, daPha: true } : r));
       }
 
+      if (seq !== reloadSeqRef.current) return; // đã có lần gọi reload() mới hơn — kết quả này cũ, bỏ qua
       setMaterials(mAfterTrash);
       setProducts(p);
       setProfiles(pr);
     } catch (err) {
-      setNote(`Lỗi tải dữ liệu: ${err.message}`);
+      if (seq === reloadSeqRef.current) setNote(`Lỗi tải dữ liệu: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (seq === reloadSeqRef.current) setLoading(false);
     }
   }, []);
 
@@ -595,25 +605,36 @@ function Connected({ session, profile }) {
     // thì Bào tử % tự tính lại (không tự đổi MĐ nhãn/MĐ SH kia); sửa Bào tử % thì MĐ SH tự tính lại
     // theo MĐ nhãn hiện có (giữ nguyên MĐ nhãn, khớp cách tính cũ trước khi thêm chiều thứ 3).
     if (field === "mdNhan" || field === "mdSH" || field === "tyLeBaoTu") {
-      const row = materials.find((r) => r.id === id);
-      const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
-      const mdSH = field === "mdSH" ? value : row?.mdSH;
-      const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
-      const patch = { [field]: value };
-      if (field !== "tyLeBaoTu" && mdNhan != null && mdSH != null) {
-        patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
-      } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
-        patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
-      } else if (field !== "mdNhan" && mdSH != null && tyLeBaoTuInput != null) {
-        patch.mdNhan = tyLeBaoTuInput !== 0 ? Math.round((mdSH / tyLeBaoTuInput) * 100 * 100) / 100 : null;
-      }
-      setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+      // Đọc dữ liệu dòng (để lấy 2 số kia) từ `prev` NGAY BÊN TRONG setMaterials thay vì biến
+      // `materials` ngoài closure — bắt buộc khi dán/kéo điền nhiều ô CÙNG 1 dòng cùng lúc (vd
+      // MĐ nhãn + MĐ SH), các lệnh gọi editField() chạy liên tiếp trước khi React kịp render lại,
+      // nên đọc `materials` ngoài sẽ luôn thấy bản CŨ (chưa có ô vừa lưu trước đó) — cả 2 lệnh
+      // tưởng chỉ có 1/3 số, không tự tính được số còn lại (bug thật gặp lúc dán 2 ô liền nhau).
+      // `prev` trong setMaterials luôn là bản MỚI NHẤT dù gọi liên tiếp nhiều lần không cần đợi
+      // render. Tính patch NGAY TRONG updater (thuần, không side-effect) rồi mới gọi API lưu ở
+      // ngoài — tránh gọi API 2 lần nếu StrictMode gọi lại updater.
+      let patch;
+      setMaterials((prev) => {
+        const row = prev.find((r) => r.id === id);
+        const mdNhan = field === "mdNhan" ? value : row?.mdNhan;
+        const mdSH = field === "mdSH" ? value : row?.mdSH;
+        const tyLeBaoTuInput = field === "tyLeBaoTu" ? value : row?.tyLeBaoTu;
+        patch = { [field]: value };
+        if (field !== "tyLeBaoTu" && mdNhan != null && mdSH != null) {
+          patch.tyLeBaoTu = mdNhan !== 0 ? Math.round((mdSH / mdNhan) * 100 * 100) / 100 : null;
+        } else if (field !== "mdSH" && mdNhan != null && tyLeBaoTuInput != null) {
+          patch.mdSH = Math.round(mdNhan * tyLeBaoTuInput / 100 * 100) / 100;
+        } else if (field !== "mdNhan" && mdSH != null && tyLeBaoTuInput != null) {
+          patch.mdNhan = tyLeBaoTuInput !== 0 ? Math.round((mdSH / tyLeBaoTuInput) * 100 * 100) / 100 : null;
+        }
+        return prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r));
+      });
       updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
       return;
     }
     setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value, updatedBy: actorId } : r)));
     updateMaterialField(id, field, value, actorId).catch((err) => setNote(`Lỗi lưu: ${err.message}`));
-  }, [actorId, materials]);
+  }, [actorId]);
   const removeRec = (id) => {
     setMaterials((prev) => prev.filter((r) => r.id !== id));
     removeMaterial(id).catch((err) => setNote(`Lỗi xoá: ${err.message}`));
@@ -776,7 +797,7 @@ function Connected({ session, profile }) {
       {mobileNavOpen && (
         <div className="fixed inset-0 bg-black/40 z-30 sm:hidden" onClick={() => setMobileNavOpen(false)} />
       )}
-      <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin}
+      <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin} isQC={isQC}
         strainFilter={strainFilter} setStrainFilter={setStrainFilter}
         onOpenHistoryAll={() => { setSpFocus(null); setTab("sp-history"); }}
         mobileOpen={mobileNavOpen} />
@@ -844,9 +865,12 @@ function Connected({ session, profile }) {
 }
 
 /* ---------------- Sidebar ---------------- */
-function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
+function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
   const displayEmail = userEmail;
-  const [nlOpen, setNlOpen] = useState(false);
+  // QC chỉ quan tâm mỗi "Quản lý NL" (phản hồi NCV 2026-09) — mở sẵn nhóm này ngay lúc vào web cho
+  // QC, khỏi phải tự bấm mở mỗi lần; các vai trò khác vẫn đóng sẵn như cũ (xem commit "đóng sẵn các
+  // nhóm menu khi mở web" 2026-08) vì họ dùng nhiều nhóm khác nhau, không có 1 nhóm cố định ưu tiên.
+  const [nlOpen, setNlOpen] = useState(() => isQC);
   const [phaOpen, setPhaOpen] = useState(false);
   const [spOpen, setSpOpen] = useState(false);
   const [lenMenOpen, setLenMenOpen] = useState(false);
@@ -1269,7 +1293,7 @@ function GroupedIntInput({ value, onChange, placeholder, className }) {
   };
   return <input value={groupIntStr(value)} onChange={handleChange} placeholder={placeholder} inputMode="numeric" className={className} />;
 }
-function EditNum({ v, on, w = "w-16" }) {
+function EditNum({ v, on, w = "w-16", commitOnBlur }) {
   // Giữ text người dùng đang gõ ở state riêng, không hiển thị lại số đã parse ngay trong lúc
   // gõ — nếu không, gõ dở "8," sẽ bị parse+hiển thị lại thành "8", nuốt mất dấu phẩy vừa gõ,
   // không gõ tiếp được số thập phân.
@@ -1280,6 +1304,18 @@ function EditNum({ v, on, w = "w-16" }) {
   // Chỉ đồng bộ lại từ v khi ô KHÔNG đang được focus (đang gõ dở thì bỏ qua, đợi blur).
   const focusedRef = useRef(false);
   useEffect(() => { if (!focusedRef.current) setText(groupNum(v)); }, [v]);
+  // commitOnBlur: dùng cho MĐ nhãn/MĐ SH/Bào tử % — 3 ô này còn tự tính chéo lẫn nhau (xem
+  // editField) và MĐ SH+Bào tử % còn quyết định lô có đủ điều kiện chuyển "Chờ pha" hay không.
+  // Lưu theo TỪNG KÝ TỰ như mặc định (vd gõ "4" của "4.52") có thể vừa đủ để tự tính xong số thứ
+  // 3 NGAY GIỮA LÚC ĐANG GÕ, lô lập tức rớt khỏi "Chờ pha"/"Chờ KQKN" đang lọc theo trạng thái —
+  // dòng biến mất khỏi bảng ngay trước mắt NCV dù chưa gõ xong (NCV phản hồi 2026-09: "đang nhập
+  // số mà nó cứ tự nhảy đi luôn"). Chỉ lưu lúc rời ô (đã gõ xong hẳn) để tránh trạng thái đổi giữa
+  // chừng.
+  const commit = () => {
+    if (text.trim() === "") { on(null); return; }
+    const n = num(text);
+    if (n != null) on(n);
+  };
   return (
     <input
       value={text}
@@ -1288,11 +1324,16 @@ function EditNum({ v, on, w = "w-16" }) {
       onChange={(e) => {
         const raw = e.target.value;
         setText(raw);
+        if (commitOnBlur) return;
         if (raw.trim() === "") { on(null); return; }
         const n = num(raw);
         if (n != null) on(n);
       }}
-      onBlur={() => { focusedRef.current = false; setText(groupNum(v)); }}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (commitOnBlur) { commit(); return; }
+        setText(groupNum(v));
+      }}
       className={`${w} text-xs border border-slate-200 rounded px-1.5 py-1 text-right focus:outline-none focus:ring-1 focus:ring-emerald-400`}
     />
   );
@@ -1422,7 +1463,7 @@ function parsePasteValue(col, raw, row) {
  * cho các cột sửa được — CHỈ trong phạm vi lô này (không kéo/dán xuyên nhiều lô), vì mỗi lô là
  * 1 <table> HTML riêng. Vẫn gọi đúng `onEdit` sẵn có cho từng ô — không viết lại logic lưu. */
 function MaterialGroupTable({
-  groupKey, list, status, roGeneral, roQcFields, canRowAction, showReason, reasonLabel,
+  groupKey, list, status, roGeneral, roQcFields, allowQcOverride, canRowAction, showReason, reasonLabel,
   onEdit, onRemove, onSoftDelete, onRestore, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy,
   nameOf, setNote,
 }) {
@@ -1617,7 +1658,7 @@ function MaterialGroupTable({
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="bg-white text-slate-400 border-b border-slate-100 text-left">
               <tr>
-                {["STT","Số lô","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
+                {[allowQcOverride ? "Sửa" : "","Số lô","V dịch (L)","Cảm quan","pH","MĐ nhãn","MĐ SH","Bào tử %","Nhiễm khuẩn","Nhiễm con nào","Loại","Ghi chú", showReason ? reasonLabel : "", status === "da-pha" ? "Pha vào" : "", status === "da-pha" ? "Ngày chuyển Đã pha" : "", "Người tạo", "Sửa gần nhất"].map((h,i)=>
                   h ? <th key={i} className="px-3 py-2 font-medium">{h}</th> : null)}
                 <th className="px-2"></th>
               </tr>
@@ -1640,7 +1681,15 @@ function MaterialGroupTable({
                 return (
                   <tr key={r.id} title={qcPastDeadline ? `Đã quá hạn trả KQ QC (${st.qcDays} ngày kể từ thời gian thu)` : undefined}
                     className={`border-b border-slate-50 hover:bg-slate-50/60 ${qcRed ? "bg-red-200 hover:bg-red-200" : ""}`}>
-                    <td className="px-3 py-1.5 text-slate-400">{r.stt}</td>
+                    {allowQcOverride && (
+                      <td className="px-2 py-1.5">
+                        <button onClick={() => { if (window.confirm(`Chuyển số lô ${r.soLo} về "Chờ KQKN" để sửa lại kết quả? Cột Nhiễm khuẩn sẽ về "chưa QC" (các số liệu khác giữ nguyên), nhập lại đủ là tự quay về Chờ pha.`)) onEdit(r.id, "nhiemKhuan", ""); }}
+                          title="Chuyển dòng này về Chờ KQKN để sửa lại kết quả QC"
+                          className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-slate-100 text-slate-500 hover:bg-amber-100 hover:text-amber-700">
+                          Sửa
+                        </button>
+                      </td>
+                    )}
                     <td className="px-3 py-1.5 font-mono">{r.soLo || "–"}</td>
                     {roGeneral ? (
                       <td className="px-2 py-1 text-right">{fmt(r.vDich,1)}</td>
@@ -1672,21 +1721,21 @@ function MaterialGroupTable({
                       <td className="px-2 py-1 text-right">{fmt(r.mdNhan)}</td>
                     ) : (
                       <SelectableTd {...cellProps("mdNhan")} className="px-2 py-1 text-right">
-                        <EditNum v={r.mdNhan} on={(x)=>onEdit(r.id,"mdNhan",x)} />
+                        <EditNum v={r.mdNhan} on={(x)=>onEdit(r.id,"mdNhan",x)} commitOnBlur />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
                       <td className="px-2 py-1 text-right">{r.mdSH==null?<span className="text-slate-300">thiếu</span>:fmt(r.mdSH)}</td>
                     ) : (
                       <SelectableTd {...cellProps("mdSH")} className={`px-2 py-1 text-right ${st.needsMdSH?"bg-amber-50":""}`}>
-                        <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} />
+                        <EditNum v={r.mdSH} on={(x)=>onEdit(r.id,"mdSH",x)} commitOnBlur />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
                       <td className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":""}`}>{r.tyLeBaoTu==null?"–":fmt(r.tyLeBaoTu,1)}</td>
                     ) : (
                       <SelectableTd {...cellProps("tyLeBaoTu")} className={`px-2 py-1 text-right ${warnBaoTu?"text-rose-600 font-medium":st.needsBaoTu?"bg-amber-50":""}`}>
-                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} />
+                        <EditNum v={r.tyLeBaoTu} on={(x)=>onEdit(r.id,"tyLeBaoTu",x)} commitOnBlur />
                       </SelectableTd>
                     )}
                     {roQcFields ? (
@@ -1901,6 +1950,12 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
   // quyền trong đúng tab này (chốt với NCV 2026-07-30, xem feedback_role_permissions).
   const roGeneral = ro || !canEditNL;
   const roQcFields = ro || (status === "cho-kqkn" ? !(canEditNL || canEditQcResults) : !canEditNL);
+  // QC thỉnh thoảng phát hiện nhập sai kết quả QC sau khi chai đã kịp chuyển sang Chờ pha (QC hết
+  // quyền sửa ở đây, chỉ admin mới sửa được — xem roQcFields) — cho QC tự bấm "Sửa" đẩy dòng đó
+  // quay lại Chờ KQKN (nơi QC vẫn có quyền sửa bình thường) để tự sửa, không cần nhờ admin (phản
+  // hồi NCV 2026-09). Xem nút "Sửa" trong MaterialGroupTable — xoá Nhiễm khuẩn về "chưa QC" là đủ
+  // để classify() tự xếp lại đúng Chờ KQKN; nhập đủ lại là tự quay về Chờ pha, không cần cờ riêng.
+  const allowQcOverride = status === "cho-pha" && !ro && !canEditNL && canEditQcResults;
   const canRowAction = canEditNL;
   const showReason = status === "cho-xu-ly" || status === "da-huy";
   const reasonLabel = status === "da-huy" ? "Lý do huỷ" : "Lý do chờ xử lý";
@@ -1948,7 +2003,7 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
     <div className="space-y-2">
       {groups.map(([key, list]) => (
         <MaterialGroupTable key={key} groupKey={key} list={list} status={status}
-          roGeneral={roGeneral} roQcFields={roQcFields} canRowAction={canRowAction}
+          roGeneral={roGeneral} roQcFields={roQcFields} allowQcOverride={allowQcOverride} canRowAction={canRowAction}
           showReason={showReason} reasonLabel={reasonLabel} nameOf={nameOf} setNote={setNote}
           onEdit={onEdit} onRemove={onRemove} onSoftDelete={onSoftDelete} onRestore={onRestore}
           onAddBottle={onAddBottle} onForceDaPha={onForceDaPha} onForceChoXuLy={onForceChoXuLy} onForceDaHuy={onForceDaHuy} />
@@ -2345,11 +2400,16 @@ function tenNguyenLieuFor(chung, sp) {
   return strain === "clausii" ? "Nguyên liệu lỏng Bacillus clausii" : "Nguyên liệu lỏng Bacillus subtilis";
 }
 
-/** NCV chỉ gõ PHẦN ĐẦU mã hóa mẻ (vd "CB010526", KHÔNG kèm "C01") — mỗi mẻ tự động nối thêm
- * "C" + số mẻ (đệm 2 số: C01, C02... tới mẻ cuối), đúng quy ước xưởng vẫn dùng. */
-function deriveMaHoaMe(base, meSo) {
-  if (!base) return "";
-  return `${base}C${String(meSo).padStart(2, "0")}`;
+/** Mã hóa mẻ in trên thân ống = Mã hóa LÔ (NCV tự gõ, vd "32126I") nối thêm số thứ tự mẻ — số
+ * này KHÔNG nhất thiết trùng "Mẻ pha" (thứ tự nội bộ trong bảng), vì xưởng có thể cần đánh số tiếp
+ * nối từ 1 mốc khác (vd nhịp trước đã dùng tới số 10, nhịp này in tiếp từ 11) — nên NCV tự gõ số
+ * mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần 1 đơn vị theo ĐÚNG thứ tự hiển thị
+ * (idx = vị trí mẻ trong bảng, 0-based). Đệm 2 số (01, 02...) khớp quy ước xưởng đang dùng. */
+function deriveMaHoaMe(maHoaLo, tuMe, idx) {
+  if (!maHoaLo) return "";
+  const start = parseInt(tuMe, 10);
+  if (!Number.isFinite(start)) return "";
+  return `${maHoaLo}${String(start + idx).padStart(2, "0")}`;
 }
 
 /** Dropdown 2 lựa chọn hay dùng + luôn cho tự điền khi chọn "Khác". */
@@ -2413,9 +2473,14 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [sauDongOngCustom, setSauDongOngCustom] = useState("");
   const [quyTrinhKhac, setQuyTrinhKhac] = useState(QUY_TRINH_KHAC_OPTIONS[0]);
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
-  // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode). Mẻ nào
-  // cần mã khác quy tắc tự tăng thì sửa riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
-  const [maHoaMeBase, setMaHoaMeBase] = useState("");
+  // Mã hóa lô (phần chữ, vd "32126I") tách riêng khỏi số thứ tự mẻ (vd "01"–"14") — NCV chỉ gõ
+  // đúng số mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần (xem deriveMaHoaMe). "Đến mẻ"
+  // chỉ để NCV đối chiếu nhanh số cuối có khớp thực tế không, không dùng để tính (số mẻ tự tăng theo
+  // đúng số dòng trong bảng, không phụ thuộc "đến mẻ"). Mẻ nào cần mã khác quy tắc tự tăng thì sửa
+  // riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
+  const [maHoaLo, setMaHoaLo] = useState("");
+  const [tuMe, setTuMe] = useState("");
+  const [denMe, setDenMe] = useState("");
   const [maHoaMeByMe, setMaHoaMeByMe] = useState({});
   // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
   // trong bảng (cột "Chốt hướng xử lý hoàn thiện", giống cách 4 cột xử lý BTP kia đang làm) — mẻ
@@ -2430,7 +2495,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
 
   const sauDongOngFinal = sauDongOng === KHAC_SENTINEL ? sauDongOngCustom : sauDongOng;
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
-  const maHoaMeFor = (meSo) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaMeBase, meSo);
+  const maHoaMeFor = (meSo, idx) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaLo, tuMe, idx);
   const maHoaMeIsOverridden = (meSo) => maHoaMeByMe[meSo] !== undefined;
   const clearMaHoaMeForMe = (meSo) => setMaHoaMeByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
   const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
@@ -2455,8 +2520,8 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const copyTable = async () => {
     const bodyHtmlRows = [];
     const textLines = [headers.join("\t")];
-    batchGroups.forEach((g) => {
-      const maHoaMe = maHoaMeFor(g.meSo);
+    batchGroups.forEach((g, gi) => {
+      const maHoaMe = maHoaMeFor(g.meSo, gi);
       const chotHuong = chotHuongFinalFor(g.meSo);
       g.items.forEach((r, ri) => {
         const common = [
@@ -2514,12 +2579,25 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
         <ProcessSelect label="Chốt hướng xử lý hoàn thiện" options={CHOT_HUONG_OPTIONS}
           value={chotHuongDefault} onChange={setChotHuongDefault} custom={chotHuongDefaultCustom} onCustomChange={setChotHuongDefaultCustom} />
         <div>
-          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ (phần đầu, không kèm "C01")</label>
-          <input value={maHoaMeBase} onChange={(e) => setMaHoaMeBase(e.target.value)} placeholder="vd CB010526"
+          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa lô</label>
+          <input value={maHoaLo} onChange={(e) => setMaHoaLo(e.target.value)} placeholder="vd 32126I"
+            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ — từ mẻ</label>
+          <input value={tuMe} onChange={(e) => setTuMe(e.target.value.replace(/[^0-9]/g, ""))} placeholder="vd 01"
+            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-500 mb-0.5">đến mẻ</label>
+          <input value={denMe} onChange={(e) => setDenMe(e.target.value.replace(/[^0-9]/g, ""))} placeholder="vd 14"
             className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
         </div>
       </div>
-      <p className="text-[11px] text-slate-400">6 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: mỗi mẻ tự nối thêm C01, C02... tới mẻ cuối) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
+      <p className="text-[11px] text-slate-400">8 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: ghép Mã hóa lô + số mẻ, tự tăng dần từ "từ mẻ" tới hết bảng — vd Mã hóa lô "32126I" + từ mẻ "01" ra "32126I01", "32126I02"...) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
+      {tuMe && denMe && Number(denMe) - Number(tuMe) + 1 !== batchGroups.length && (
+        <p className="text-[11px] text-amber-600">⚠ Từ mẻ {tuMe} đến mẻ {denMe} là {Number(denMe) - Number(tuMe) + 1} mẻ, nhưng bảng dưới có {batchGroups.length} mẻ — kiểm tra lại nếu không chủ ý.</p>
+      )}
 
       <div className="overflow-x-auto bg-white border border-slate-200 rounded-md">
         <table className="w-full text-[11px] whitespace-nowrap">
@@ -2527,7 +2605,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
           <tbody>
             {batchGroups.map((g, gi) => {
               const rowBg = gi % 2 === 1 ? "bg-indigo-100/70" : "bg-white";
-              const maHoaMe = maHoaMeFor(g.meSo);
+              const maHoaMe = maHoaMeFor(g.meSo, gi);
               return g.items.map((r, ri) => (
                 <tr key={r.key} className={`border-b border-slate-200 ${rowBg} ${ri === 0 && gi > 0 ? "border-t-2 border-t-slate-400" : ""}`}>
                   {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-top">{g.meSo}</td>}
