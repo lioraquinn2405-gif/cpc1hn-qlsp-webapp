@@ -2400,11 +2400,16 @@ function tenNguyenLieuFor(chung, sp) {
   return strain === "clausii" ? "Nguyên liệu lỏng Bacillus clausii" : "Nguyên liệu lỏng Bacillus subtilis";
 }
 
-/** NCV chỉ gõ PHẦN ĐẦU mã hóa mẻ (vd "CB010526", KHÔNG kèm "C01") — mỗi mẻ tự động nối thêm
- * "C" + số mẻ (đệm 2 số: C01, C02... tới mẻ cuối), đúng quy ước xưởng vẫn dùng. */
-function deriveMaHoaMe(base, meSo) {
-  if (!base) return "";
-  return `${base}C${String(meSo).padStart(2, "0")}`;
+/** Mã hóa mẻ in trên thân ống = Mã hóa LÔ (NCV tự gõ, vd "32126I") nối thêm số thứ tự mẻ — số
+ * này KHÔNG nhất thiết trùng "Mẻ pha" (thứ tự nội bộ trong bảng), vì xưởng có thể cần đánh số tiếp
+ * nối từ 1 mốc khác (vd nhịp trước đã dùng tới số 10, nhịp này in tiếp từ 11) — nên NCV tự gõ số
+ * mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần 1 đơn vị theo ĐÚNG thứ tự hiển thị
+ * (idx = vị trí mẻ trong bảng, 0-based). Đệm 2 số (01, 02...) khớp quy ước xưởng đang dùng. */
+function deriveMaHoaMe(maHoaLo, tuMe, idx) {
+  if (!maHoaLo) return "";
+  const start = parseInt(tuMe, 10);
+  if (!Number.isFinite(start)) return "";
+  return `${maHoaLo}${String(start + idx).padStart(2, "0")}`;
 }
 
 /** Dropdown 2 lựa chọn hay dùng + luôn cho tự điền khi chọn "Khác". */
@@ -2468,9 +2473,14 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [sauDongOngCustom, setSauDongOngCustom] = useState("");
   const [quyTrinhKhac, setQuyTrinhKhac] = useState(QUY_TRINH_KHAC_OPTIONS[0]);
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
-  // NCV chỉ gõ mã hóa mẻ ĐẦU TIÊN — các mẻ sau tự tăng số đuôi (xem deriveSequentialCode). Mẻ nào
-  // cần mã khác quy tắc tự tăng thì sửa riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
-  const [maHoaMeBase, setMaHoaMeBase] = useState("");
+  // Mã hóa lô (phần chữ, vd "32126I") tách riêng khỏi số thứ tự mẻ (vd "01"–"14") — NCV chỉ gõ
+  // đúng số mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần (xem deriveMaHoaMe). "Đến mẻ"
+  // chỉ để NCV đối chiếu nhanh số cuối có khớp thực tế không, không dùng để tính (số mẻ tự tăng theo
+  // đúng số dòng trong bảng, không phụ thuộc "đến mẻ"). Mẻ nào cần mã khác quy tắc tự tăng thì sửa
+  // riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
+  const [maHoaLo, setMaHoaLo] = useState("");
+  const [tuMe, setTuMe] = useState("");
+  const [denMe, setDenMe] = useState("");
   const [maHoaMeByMe, setMaHoaMeByMe] = useState({});
   // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
   // trong bảng (cột "Chốt hướng xử lý hoàn thiện", giống cách 4 cột xử lý BTP kia đang làm) — mẻ
@@ -2485,7 +2495,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
 
   const sauDongOngFinal = sauDongOng === KHAC_SENTINEL ? sauDongOngCustom : sauDongOng;
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
-  const maHoaMeFor = (meSo) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaMeBase, meSo);
+  const maHoaMeFor = (meSo, idx) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaLo, tuMe, idx);
   const maHoaMeIsOverridden = (meSo) => maHoaMeByMe[meSo] !== undefined;
   const clearMaHoaMeForMe = (meSo) => setMaHoaMeByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
   const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
@@ -2510,8 +2520,8 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const copyTable = async () => {
     const bodyHtmlRows = [];
     const textLines = [headers.join("\t")];
-    batchGroups.forEach((g) => {
-      const maHoaMe = maHoaMeFor(g.meSo);
+    batchGroups.forEach((g, gi) => {
+      const maHoaMe = maHoaMeFor(g.meSo, gi);
       const chotHuong = chotHuongFinalFor(g.meSo);
       g.items.forEach((r, ri) => {
         const common = [
@@ -2569,12 +2579,25 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
         <ProcessSelect label="Chốt hướng xử lý hoàn thiện" options={CHOT_HUONG_OPTIONS}
           value={chotHuongDefault} onChange={setChotHuongDefault} custom={chotHuongDefaultCustom} onCustomChange={setChotHuongDefaultCustom} />
         <div>
-          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ (phần đầu, không kèm "C01")</label>
-          <input value={maHoaMeBase} onChange={(e) => setMaHoaMeBase(e.target.value)} placeholder="vd CB010526"
+          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa lô</label>
+          <input value={maHoaLo} onChange={(e) => setMaHoaLo(e.target.value)} placeholder="vd 32126I"
+            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-500 mb-0.5">Mã hóa mẻ — từ mẻ</label>
+          <input value={tuMe} onChange={(e) => setTuMe(e.target.value.replace(/[^0-9]/g, ""))} placeholder="vd 01"
+            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
+        </div>
+        <div>
+          <label className="block text-[11px] text-slate-500 mb-0.5">đến mẻ</label>
+          <input value={denMe} onChange={(e) => setDenMe(e.target.value.replace(/[^0-9]/g, ""))} placeholder="vd 14"
             className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
         </div>
       </div>
-      <p className="text-[11px] text-slate-400">6 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: mỗi mẻ tự nối thêm C01, C02... tới mẻ cuối) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
+      <p className="text-[11px] text-slate-400">8 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: ghép Mã hóa lô + số mẻ, tự tăng dần từ "từ mẻ" tới hết bảng — vd Mã hóa lô "32126I" + từ mẻ "01" ra "32126I01", "32126I02"...) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
+      {tuMe && denMe && Number(denMe) - Number(tuMe) + 1 !== batchGroups.length && (
+        <p className="text-[11px] text-amber-600">⚠ Từ mẻ {tuMe} đến mẻ {denMe} là {Number(denMe) - Number(tuMe) + 1} mẻ, nhưng bảng dưới có {batchGroups.length} mẻ — kiểm tra lại nếu không chủ ý.</p>
+      )}
 
       <div className="overflow-x-auto bg-white border border-slate-200 rounded-md">
         <table className="w-full text-[11px] whitespace-nowrap">
@@ -2582,7 +2605,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
           <tbody>
             {batchGroups.map((g, gi) => {
               const rowBg = gi % 2 === 1 ? "bg-indigo-100/70" : "bg-white";
-              const maHoaMe = maHoaMeFor(g.meSo);
+              const maHoaMe = maHoaMeFor(g.meSo, gi);
               return g.items.map((r, ri) => (
                 <tr key={r.key} className={`border-b border-slate-200 ${rowBg} ${ri === 0 && gi > 0 ? "border-t-2 border-t-slate-400" : ""}`}>
                   {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-top">{g.meSo}</td>}
