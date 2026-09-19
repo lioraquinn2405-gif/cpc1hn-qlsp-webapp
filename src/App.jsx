@@ -3396,6 +3396,12 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           <div>
             <div className="font-medium">Không lập được kế hoạch khả thi</div>
             <p className="mt-1">{plan.reason}</p>
+            {plan.maxOng != null && (
+              <p className="mt-2 font-semibold text-rose-800">
+                Kho hiện chỉ pha được tối đa khoảng {fmt(plan.maxOng, 0)} ống
+                {num(nInput) > 0 ? ` (cần ${fmt(num(nInput), 0)} ống — thiếu ${fmt(Math.max(0, num(nInput) - plan.maxOng), 0)} ống)` : ""}.
+              </p>
+            )}
           </div>
         </div>
       )}
