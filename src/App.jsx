@@ -498,7 +498,9 @@ function Connected({ session, profile }) {
   const [products, setProducts] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState("cho-pha");
+  // KH (kế hoạch) chỉ quan tâm màn "Pha chế SX" (tính kế hoạch/số ống pha được) — vào web là mở
+  // thẳng màn đó, các vai trò khác vẫn vào "Chờ pha" như cũ (phản hồi NCV 2026-09).
+  const [tab, setTab] = useState(profile.role === "kh" ? "ke-hoach" : "cho-pha");
   const [strainFilter, setStrainFilter] = useState("all");
   // Bộ lọc bảng NL (áp dụng cho mọi tab NL: Chờ KQKN/Chờ pha/Chờ xử lý/Đã pha/Đã huỷ/Thùng rác) —
   // tách riêng khỏi strainFilter (vốn ở Sidebar, không đổi khi chuyển tab) vì đây là lọc trong
@@ -806,7 +808,7 @@ function Connected({ session, profile }) {
       {mobileNavOpen && (
         <div className="fixed inset-0 bg-black/40 z-30 sm:hidden" onClick={() => setMobileNavOpen(false)} />
       )}
-      <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin} isQC={isQC}
+      <Sidebar tab={tab} setTab={setTab} counts={counts} userEmail={identityLabel(session.user)} userFullName={profile?.fullName} isAdmin={isAdmin} isQC={isQC} isKH={profile.role === "kh"}
         strainFilter={strainFilter} setStrainFilter={setStrainFilter}
         onOpenHistoryAll={() => { setSpFocus(null); setTab("sp-history"); }}
         mobileOpen={mobileNavOpen} />
@@ -874,13 +876,14 @@ function Connected({ session, profile }) {
 }
 
 /* ---------------- Sidebar ---------------- */
-function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
+function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, isKH, strainFilter, setStrainFilter, onOpenHistoryAll, mobileOpen }) {
   const displayEmail = userEmail;
   // QC chỉ quan tâm mỗi "Quản lý NL" (phản hồi NCV 2026-09) — mở sẵn nhóm này ngay lúc vào web cho
   // QC, khỏi phải tự bấm mở mỗi lần; các vai trò khác vẫn đóng sẵn như cũ (xem commit "đóng sẵn các
   // nhóm menu khi mở web" 2026-08) vì họ dùng nhiều nhóm khác nhau, không có 1 nhóm cố định ưu tiên.
   const [nlOpen, setNlOpen] = useState(() => isQC);
-  const [phaOpen, setPhaOpen] = useState(false);
+  // KH: mở sẵn nhóm "Pha chế" (đúng nhóm chứa "Pha chế SX" họ dùng chính), giống QC ở trên.
+  const [phaOpen, setPhaOpen] = useState(() => isKH);
   const [spOpen, setSpOpen] = useState(false);
   const [lenMenOpen, setLenMenOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState({});
