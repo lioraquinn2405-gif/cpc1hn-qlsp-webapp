@@ -130,6 +130,9 @@ function parseSoLoOrderKey(soLo) {
   }
   return null;
 }
+// Cảm quan giờ là dropdown Đạt/Không đạt (trước là ô gõ tự do) — "Không đạt" tự đẩy sang "Chờ xử
+// lý" như Nhiễm khuẩn (chốt NCV 2026-09), xem classify().
+const CAM_QUAN_OPTIONS = ["Đạt", "Không đạt"];
 const EXPIRY_MONTHS = 13;
 function monthsSince(rec) {
   const d = productionDate(rec);
@@ -186,7 +189,13 @@ function classify(rec) {
   const missingGhiChu = isFail && !isPassSub && !!rec.nhiemConNao && !rec.ghiChu;
   const missingNhiemConNao = isFail && !isPassSub && !rec.nhiemConNao;
 
-  if (!nk || missingNhiemConNao || missingGhiChu) {
+  // Cảm quan "Không đạt" tự đẩy sang "Chờ xử lý" như Nhiễm khuẩn — xét ĐỘC LẬP, không cần chờ
+  // Nhiễm khuẩn đã nhập xong (cảm quan hỏng thì cần xử lý ngay, không phụ thuộc kết quả vi sinh).
+  const cq = norm(rec.camQuan);
+  const cqFail = cq.includes("khong");
+  if (cqFail) reasons.push("Cảm quan không đạt");
+
+  if (!nk || !cq || missingNhiemConNao || missingGhiChu) {
     if (reasons.length) return { status: disposed ? "da-huy" : "cho-xu-ly", loai: null, expired, nearExpiry, reasons };
     return { status: "cho-kqkn", loai: null, chuaQC: true, nearExpiry, qcDays: daysSinceThu(rec), needsNhiemConNao: missingNhiemConNao, needsGhiChu: missingGhiChu };
   }
@@ -1478,7 +1487,7 @@ function MaterialGroupTable({
     // Thời gian thu/Lô chủng KHÔNG nằm trong lưới chọn/copy/dán nữa — đã chuyển lên sửa
     // 1 lần ở thanh tiêu đề nhóm (áp dụng luôn cho cả lô), không còn là cột riêng của bảng.
     if (!roGeneral) cols.push({ key: "vDich", type: "number" });
-    if (!roQcFields) cols.push({ key: "camQuan", type: "text" });
+    if (!roQcFields) cols.push({ key: "camQuan", type: "select", optionsFor: () => CAM_QUAN_OPTIONS });
     if (!roQcFields) cols.push({ key: "pH", type: "number" });
     if (!roQcFields) cols.push({ key: "mdNhan", type: "number" });
     if (!roQcFields) cols.push({ key: "mdSH", type: "number" });
@@ -1702,7 +1711,11 @@ function MaterialGroupTable({
                       <td className="px-2 py-1">{r.camQuan || "–"}</td>
                     ) : (
                       <SelectableTd {...cellProps("camQuan")} className="px-2 py-1">
-                        <EditText v={r.camQuan} on={(x)=>onEdit(r.id,"camQuan",x)} w="w-20" />
+                        <select value={r.camQuan || ""} onChange={(e)=>onEdit(r.id,"camQuan",e.target.value)}
+                          className={`text-xs border rounded px-1.5 py-1 ${!r.camQuan ? "border-amber-300 bg-amber-50" : "border-slate-200"}`}>
+                          <option value="">– chưa QC –</option>
+                          {CAM_QUAN_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                        </select>
                       </SelectableTd>
                     )}
                     {roQcFields ? (
@@ -2224,6 +2237,27 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
     return planEntries;
   }, [choSxMaterials]);
 
+  // Tra cứu nhanh rows theo key ("planId-meSo") — dùng cho tích chọn hàng loạt (confirmSelected) và
+  // "Chọn tất cả" (không cần lặp lại đúng cấu trúc groups mỗi lần).
+  const keyedRows = useMemo(() => {
+    const m = {};
+    groups.forEach(([planId, meEntries]) => meEntries.forEach(([meSo, rows]) => { m[`${planId}-${meSo}`] = rows; }));
+    return m;
+  }, [groups]);
+  const allKeys = useMemo(() => Object.keys(keyedRows), [keyedRows]);
+  // Tích chọn nhiều mẻ (mọi nhịp sản xuất đang hiện) rồi xác nhận 1 LẦN thay vì bấm "Xác nhận đã
+  // pha" riêng từng mẻ — trước đây mỗi lần bấm còn tự nhảy sang "Lịch sử pha chế" (onConfirmed),
+  // xác nhận nhiều mẻ liên tiếp bị nhảy trang lặp lại rất khó chịu (NCV phản hồi 2026-09). Giờ chỉ
+  // nhảy trang ĐÚNG 1 LẦN sau khi xác nhận xong cả loạt đã tích (xem confirmSelected).
+  const [selectedKeys, setSelectedKeys] = useState(() => new Set());
+  const toggleSelect = (key) => setSelectedKeys((prev) => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+  const allSelected = allKeys.length > 0 && allKeys.every((k) => selectedKeys.has(k));
+  const toggleSelectAll = () => setSelectedKeys(allSelected ? new Set() : new Set(allKeys));
+
   // Soi lại đúng ket_qua GỐC của kế hoạch đã Duyệt (không tự suy ra từ materials) — để hiện lại đúng
   // "Bảng mẻ pha" đầy đủ y hệt lúc lập kế hoạch (định lượng CFU/ml, mật độ mục tiêu, V dịch pha, V
   // lấy nước, cỡ ống...), cho NCV đối chiếu lại lần 2 trước khi xác nhận đã pha — không phải chỉ 1
@@ -2241,24 +2275,47 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
   const [busyKey, setBusyKey] = useState(null); // key của nhóm đang xử lý — disable đúng nút đó trong lúc chờ
   const [exportPlanId, setExportPlanId] = useState(null); // planId đang mở form "Tạo thông tin gửi mail"
 
-  const confirmMe = async (key, rows) => {
-    setBusyKey(key);
-    try {
-      const r0 = rows[0];
-      const todayStr = new Date().toISOString().slice(2, 10).replace(/-/g, "");
-      const phaMe = `${r0.phaProduct || r0.strain}-P${r0.mixPlanId}M${r0.mixPlanMeSo}-${todayStr}`;
-      await confirmMixBatch(rows.map((r) => r.id), { daPha: true, daPhaAt: new Date().toISOString(), phaMe, phaProduct: r0.phaProduct }, actorId);
-      // Số lượng dự kiến (cỡ lô ống) lấy từ đúng mẻ trong kế hoạch gốc đã Duyệt — cùng công thức
-      // tongTheTich*1000/tubeMl đang dùng để hiện "Cỡ lô (ống)" ở bảng kế hoạch.
-      const sp = products.find((p) => p.maSP === r0.phaProduct);
-      const originalPlan = plansById[r0.mixPlanId];
-      const batch = originalPlan?.ketQua?.batches?.find((b) => b.meSo === r0.mixPlanMeSo);
-      const soLuongDuKien = batch && sp?.tubeMl ? (batch.tongTheTich * 1000) / sp.tubeMl : null;
-      if (r0.phaProduct) await createFinishedBatch({ tenSP: sp?.tenSP, phaMe, soLuongDuKien, createdBy: actorId });
-      setNote(`Đã xác nhận đã pha — mẻ ${r0.mixPlanMeSo} (mã mẻ ${phaMe}).`);
-      if (r0.phaProduct) onConfirmed?.(r0.phaProduct);
-    } catch (err) { setNote(`Lỗi xác nhận đã pha: ${err.message}`); }
-    finally { setBusyKey(null); }
+  // Thực hiện đúng phần việc xác nhận 1 mẻ — dùng trong vòng lặp của confirmSelected, tự KHÔNG
+  // setNote/điều hướng ở đây để nơi gọi báo/điều hướng đúng 1 lần cho cả loạt đã chọn.
+  const confirmOneMe = async (rows) => {
+    const r0 = rows[0];
+    const todayStr = new Date().toISOString().slice(2, 10).replace(/-/g, "");
+    const phaMe = `${r0.phaProduct || r0.strain}-P${r0.mixPlanId}M${r0.mixPlanMeSo}-${todayStr}`;
+    await confirmMixBatch(rows.map((r) => r.id), { daPha: true, daPhaAt: new Date().toISOString(), phaMe, phaProduct: r0.phaProduct }, actorId);
+    // Số lượng dự kiến (cỡ lô ống) lấy từ đúng mẻ trong kế hoạch gốc đã Duyệt — cùng công thức
+    // tongTheTich*1000/tubeMl đang dùng để hiện "Cỡ lô (ống)" ở bảng kế hoạch.
+    const sp = products.find((p) => p.maSP === r0.phaProduct);
+    const originalPlan = plansById[r0.mixPlanId];
+    const batch = originalPlan?.ketQua?.batches?.find((b) => b.meSo === r0.mixPlanMeSo);
+    const soLuongDuKien = batch && sp?.tubeMl ? (batch.tongTheTich * 1000) / sp.tubeMl : null;
+    if (r0.phaProduct) await createFinishedBatch({ tenSP: sp?.tenSP, phaMe, soLuongDuKien, createdBy: actorId });
+    return { meSo: r0.mixPlanMeSo, phaMe, phaProduct: r0.phaProduct };
+  };
+
+  // Xác nhận TẤT CẢ mẻ đã tích chọn — chạy tuần tự (an toàn với cơ chế reload() vốn đã tự chống
+  // race lúc ghi dồn dập, xem editField/reload), chỉ báo kết quả + điều hướng ĐÚNG 1 LẦN ở cuối.
+  // Chỉ tự nhảy sang "Lịch sử pha chế" khi cả loạt cùng 1 sản phẩm (nhảy tới đúng SP nào cũng được
+  // nếu lẫn nhiều SP khác nhau sẽ gây hiểu lầm là chỉ xác nhận đúng SP đó) — lẫn nhiều SP thì chỉ
+  // báo note, NCV tự vào Lịch sử pha chế xem nếu cần.
+  const confirmSelected = async () => {
+    const items = [...selectedKeys].map((key) => keyedRows[key]).filter(Boolean);
+    if (!items.length) return;
+    setBusyKey("__bulk__");
+    const done = [];
+    let firstError = null;
+    for (const rows of items) {
+      try { done.push(await confirmOneMe(rows)); }
+      catch (err) { firstError = firstError ?? err; }
+    }
+    setBusyKey(null);
+    setSelectedKeys(new Set());
+    if (done.length) {
+      setNote(`Đã xác nhận đã pha ${done.length} mẻ${firstError ? ` — 1 mẻ lỗi: ${firstError.message}` : "."}`);
+      const distinctProducts = new Set(done.map((d) => d.phaProduct).filter(Boolean));
+      if (distinctProducts.size === 1) onConfirmed?.([...distinctProducts][0]);
+    } else if (firstError) {
+      setNote(`Lỗi xác nhận đã pha: ${firstError.message}`);
+    }
   };
 
   const cancelMe = async (key, rows) => {
@@ -2296,7 +2353,20 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500 flex items-center gap-1.5"><Factory className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Bấm "Xác nhận đã pha" đúng lúc mẻ đó thực sự đã pha xong; nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha" — hoặc bấm "Bỏ tất cả mẻ" ở đầu mỗi nhịp sản xuất nếu cần bỏ nguyên cả nhịp cùng lúc.</p>
+        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Tích ô "Đã pha xong" ở (các) mẻ đã pha thật rồi bấm "Xác nhận đã pha" bên dưới (tích được nhiều mẻ, xác nhận 1 lần); nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha" — hoặc bấm "Bỏ tất cả mẻ" ở đầu mỗi nhịp sản xuất nếu cần bỏ nguyên cả nhịp cùng lúc.</p>
+      {canEdit && allKeys.length > 0 && (
+        <div className="sticky z-10 flex items-center gap-3 px-4 py-2 bg-white border border-slate-200 rounded-lg shadow-sm"
+          style={{ top: "var(--topbar-h, 76px)" }}>
+          <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+            <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="accent-emerald-600 w-4 h-4" />
+            Chọn tất cả ({allKeys.length} mẻ)
+          </label>
+          <button onClick={confirmSelected} disabled={selectedKeys.size === 0 || busyKey != null}
+            className="ml-auto flex items-center gap-1.5 bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
+            <CheckCircle2 className="w-3.5 h-3.5" /> Xác nhận đã pha ({selectedKeys.size} mẻ đã chọn)
+          </button>
+        </div>
+      )}
       {groups.map(([planId, meEntries]) => {
         const allRows = meEntries.flatMap(([, rows]) => rows);
         const r0plan = allRows[0];
@@ -2349,10 +2419,11 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
                     )}
                     {canEdit && (
                       <>
-                        <button onClick={() => confirmMe(key, rows)} disabled={busyKey != null}
-                          className="ml-auto flex items-center gap-1.5 bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Xác nhận đã pha
-                        </button>
+                        <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+                          <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelect(key)}
+                            disabled={busyKey != null} className="accent-emerald-600 w-4 h-4" />
+                          Đã pha xong
+                        </label>
                         <button onClick={() => cancelMe(key, rows)} disabled={busyKey != null} title="Bỏ mẻ này, trả NL về Chờ pha"
                           className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 disabled:opacity-40">
                           <X className="w-3.5 h-3.5" />
@@ -2474,13 +2545,11 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const [quyTrinhKhac, setQuyTrinhKhac] = useState(QUY_TRINH_KHAC_OPTIONS[0]);
   const [quyTrinhKhacCustom, setQuyTrinhKhacCustom] = useState("");
   // Mã hóa lô (phần chữ, vd "32126I") tách riêng khỏi số thứ tự mẻ (vd "01"–"14") — NCV chỉ gõ
-  // đúng số mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần (xem deriveMaHoaMe). "Đến mẻ"
-  // chỉ để NCV đối chiếu nhanh số cuối có khớp thực tế không, không dùng để tính (số mẻ tự tăng theo
-  // đúng số dòng trong bảng, không phụ thuộc "đến mẻ"). Mẻ nào cần mã khác quy tắc tự tăng thì sửa
-  // riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
+  // đúng số mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần (xem deriveMaHoaMe) — "đến mẻ"
+  // KHÔNG cần gõ tay nữa, tự cộng = từ mẻ + số mẻ trong bảng - 1 (xem denMe bên dưới). Mẻ nào cần mã
+  // khác quy tắc tự tăng thì sửa riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
   const [maHoaLo, setMaHoaLo] = useState("");
   const [tuMe, setTuMe] = useState("");
-  const [denMe, setDenMe] = useState("");
   const [maHoaMeByMe, setMaHoaMeByMe] = useState({});
   // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
   // trong bảng (cột "Chốt hướng xử lý hoàn thiện", giống cách 4 cột xử lý BTP kia đang làm) — mẻ
@@ -2496,6 +2565,13 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   const sauDongOngFinal = sauDongOng === KHAC_SENTINEL ? sauDongOngCustom : sauDongOng;
   const quyTrinhKhacFinal = quyTrinhKhac === KHAC_SENTINEL ? quyTrinhKhacCustom : quyTrinhKhac;
   const maHoaMeFor = (meSo, idx) => maHoaMeByMe[meSo] ?? deriveMaHoaMe(maHoaLo, tuMe, idx);
+  // STT "Mẻ pha" hiện ra ĐÚNG số đã ghép vào Mã hóa mẻ (vd "01"), không phải số thứ tự nội bộ
+  // g.meSo nữa — để NCV nhìn STT là biết ngay số in trên thân ống, khỏi phải đối chiếu 2 cột (phản
+  // hồi NCV 2026-09). Chưa gõ "từ mẻ" thì tạm hiện số thứ tự 1,2,3... như trước.
+  const tuMeNum = parseInt(tuMe, 10);
+  const meDisplayNo = (idx) => (Number.isFinite(tuMeNum) ? String(tuMeNum + idx).padStart(2, "0") : String(idx + 1));
+  // "đến mẻ" tự cộng từ "từ mẻ" + số mẻ đang có trong bảng — không cần NCV tự gõ/đối chiếu nữa.
+  const denMe = Number.isFinite(tuMeNum) && batchGroups.length ? String(tuMeNum + batchGroups.length - 1) : "";
   const maHoaMeIsOverridden = (meSo) => maHoaMeByMe[meSo] !== undefined;
   const clearMaHoaMeForMe = (meSo) => setMaHoaMeByMe((prev) => { const { [meSo]: _drop, ...rest } = prev; return rest; });
   const chotHuongDefaultFinal = chotHuongDefault === KHAC_SENTINEL ? chotHuongDefaultCustom : chotHuongDefault;
@@ -2523,6 +2599,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
     batchGroups.forEach((g, gi) => {
       const maHoaMe = maHoaMeFor(g.meSo, gi);
       const chotHuong = chotHuongFinalFor(g.meSo);
+      const meNo = meDisplayNo(gi);
       g.items.forEach((r, ri) => {
         const common = [
           tenNguyenLieuFor(r.chung, sp), r.maLo, sci(r.E), fmt(r.vRaw, 2), sci(r.d), String(sp.tubeMl),
@@ -2532,14 +2609,14 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
         ];
         const htmlCells = [];
         if (ri === 0) {
-          htmlCells.push(`<td rowspan="${g.items.length}">${g.meSo}</td>`, `<td rowspan="${g.items.length}">${fmt(g.tongTheTich, 2)}</td>`);
+          htmlCells.push(`<td rowspan="${g.items.length}">${meNo}</td>`, `<td rowspan="${g.items.length}">${fmt(g.tongTheTich, 2)}</td>`);
         }
         htmlCells.push(...common.map((c) => `<td>${c}</td>`));
         if (ri === 0) {
           htmlCells.push(`<td rowspan="${g.items.length}">${maHoaMe}</td>`, `<td rowspan="${g.items.length}">${chotHuong}</td>`);
         }
         bodyHtmlRows.push(`<tr>${htmlCells.join("")}</tr>`);
-        textLines.push([ri === 0 ? String(g.meSo) : "", ri === 0 ? fmt(g.tongTheTich, 2) : "", ...common, ri === 0 ? maHoaMe : "", ri === 0 ? chotHuong : ""].join("\t"));
+        textLines.push([ri === 0 ? meNo : "", ri === 0 ? fmt(g.tongTheTich, 2) : "", ...common, ri === 0 ? maHoaMe : "", ri === 0 ? chotHuong : ""].join("\t"));
       });
     });
     const html = `<table border="1" cellspacing="0" cellpadding="4"><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${bodyHtmlRows.join("")}</tbody></table>`;
@@ -2589,15 +2666,12 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
             className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
         </div>
         <div>
-          <label className="block text-[11px] text-slate-500 mb-0.5">đến mẻ</label>
-          <input value={denMe} onChange={(e) => setDenMe(e.target.value.replace(/[^0-9]/g, ""))} placeholder="vd 14"
-            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5" />
+          <label className="block text-[11px] text-slate-500 mb-0.5">đến mẻ (tự tính)</label>
+          <input value={denMe} disabled placeholder="—"
+            className="w-full text-xs border border-slate-200 rounded px-2 py-1.5 bg-slate-50 text-slate-500" />
         </div>
       </div>
-      <p className="text-[11px] text-slate-400">8 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: ghép Mã hóa lô + số mẻ, tự tăng dần từ "từ mẻ" tới hết bảng — vd Mã hóa lô "32126I" + từ mẻ "01" ra "32126I01", "32126I02"...) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
-      {tuMe && denMe && Number(denMe) - Number(tuMe) + 1 !== batchGroups.length && (
-        <p className="text-[11px] text-amber-600">⚠ Từ mẻ {tuMe} đến mẻ {denMe} là {Number(denMe) - Number(tuMe) + 1} mẻ, nhưng bảng dưới có {batchGroups.length} mẻ — kiểm tra lại nếu không chủ ý.</p>
-      )}
+      <p className="text-[11px] text-slate-400">8 ô trên áp dụng mặc định cho mọi lô/mẻ bên dưới (riêng Mã hóa mẻ: ghép Mã hóa lô + số mẻ, tự tăng dần từ "từ mẻ" tới hết bảng — vd Mã hóa lô "32126I" + từ mẻ "01" ra "32126I01", "32126I02"..., "đến mẻ" tự cộng theo đúng số mẻ đang có, không cần gõ tay) — lô/mẻ nào tách riêng test điều kiện khác thì sửa thẳng trong bảng, không ảnh hưởng các lô/mẻ còn lại.</p>
 
       <div className="overflow-x-auto bg-white border border-slate-200 rounded-md">
         <table className="w-full text-[11px] whitespace-nowrap">
@@ -2608,7 +2682,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
               const maHoaMe = maHoaMeFor(g.meSo, gi);
               return g.items.map((r, ri) => (
                 <tr key={r.key} className={`border-b border-slate-200 ${rowBg} ${ri === 0 && gi > 0 ? "border-t-2 border-t-slate-400" : ""}`}>
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-top">{g.meSo}</td>}
+                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-top">{meDisplayNo(gi)}</td>}
                   {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 align-top">{fmt(g.tongTheTich, 2)}</td>}
                   <td className="px-2 py-1">{tenNguyenLieuFor(r.chung, sp)}</td>
                   <td className="px-2 py-1 font-mono">{r.maLo}</td>
