@@ -467,7 +467,11 @@ export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxL
   const best = fifo ? { ...fifo, ...densityAndTubes(fifo.sumValue, { H, G }) } : null;
 
   if (!best || best.sumValue < vMin - EPS) {
-    return { feasible: false, reason: "Kho hiện có (đã qua KQKN, ở Chờ pha) không đủ nguyên liệu để đạt tối thiểu 90% số ống cần — cần NCV bổ sung nguyên liệu hoặc điều chỉnh đơn." };
+    // maxOng: số ống tối đa pha được nếu dùng HẾT kho hiện có ở đúng mật độ đích G — để NCV thấy
+    // ngay đang thiếu bao nhiêu thay vì chỉ biết "không đủ".
+    const totalValue = lots.reduce((s, l) => s + l.E * l.F, 0);
+    const maxOng = Math.floor((totalValue * 1000) / (G * H));
+    return { feasible: false, maxOng, reason: "Kho hiện có (đã qua KQKN, ở Chờ pha) không đủ nguyên liệu để đạt tối thiểu 90% số ống cần — cần NCV bổ sung nguyên liệu hoặc điều chỉnh đơn." };
   }
 
   const batches = wholeBottleOnly
@@ -1147,7 +1151,7 @@ export function planTwoComponent({ subtilisLots, clausiiLots, product, tankMaxL 
     const reason = subtilisShortfallLot
       ? `Kho subtilis không đủ để dùng hết lô clausii "${subtilisShortfallLot}" mà không để dở dang (nguyên tắc bắt buộc — clausii không bao giờ được để dở) — kế hoạch chỉ đạt ${totalV.toFixed(1)}L, dưới 90% mục tiêu. Cần bổ sung subtilis hoặc điều chỉnh đơn.`
       : "Kho subtilis và/hoặc clausii hiện có (đã qua KQKN, ở Chờ pha) không đủ để đạt tối thiểu 90% số ống cần — cần NCV bổ sung nguyên liệu hoặc điều chỉnh đơn.";
-    return { feasible: false, reason, subtilisShortfallLot };
+    return { feasible: false, reason, subtilisShortfallLot, maxOng: Math.floor((totalV * 1000) / H) };
   }
 
   const T = Math.floor((totalV * 1000) / H);
