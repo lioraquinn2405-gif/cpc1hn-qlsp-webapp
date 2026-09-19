@@ -102,6 +102,30 @@ function parseVnDateIso_(s) {
   return year + "-" + mm + "-" + dd;
 }
 
+
+var VERTICAL_LABEL_RE_ = /^(cong\s*doan|ngay\s*thu|nguoi\s*thu|chai\s*thu\s*dich|so\s*lo\s*ky\s*hieu|ph|cam\s*quan|the\s*tich.*thu\s*duoc|bat\s*thuong|dieu\s*kien\s*bao\s*quan|ket\s*luan)(\b|$)/;
+// Dựng lại "hàng" từ mail mỗi ô 1 dòng: dòng khớp nhãn cột mở hàng mới, các dòng sau là giá trị
+// của hàng đó. Riêng khối "Mã vật tư | Nguyên liệu | Lệnh SX | Mẻ SX | Ngày SX" (5 nhãn rồi 5 giá
+// trị) tách riêng thành 2 hàng.
+function rowsFromOneCellPerLine_(lines) {
+  var rows = [], cur = null;
+  for (var i = 0; i < lines.length; i++) {
+    var t = lines[i].trim(), n = norm_(t);
+    if (/^ma\s*vat\s*tu/.test(n)) {
+      rows.push(lines.slice(i, i + 5).map(function (x) { return x.trim(); }));
+      rows.push(lines.slice(i + 5, i + 10).map(function (x) { return x.trim(); }));
+      i += 9; cur = null;
+      continue;
+    }
+    if (VERTICAL_LABEL_RE_.test(n) && (!/^ph/.test(n) || n === "ph")) {
+      cur = [t]; rows.push(cur);
+    } else if (cur) {
+      cur.push(t);
+    }
+  }
+  return rows;
+}
+
 // Tách 1 email dạng bảng (đã qua getPlainBody, cột cách nhau bởi tab hoặc
 // nhiều khoảng trắng) thành các chai NL thu được. Trả về null nếu không nhận
 // diện được dòng "Số lô ký hiệu" — coi như không đúng định dạng, bỏ qua.
@@ -121,6 +145,14 @@ function parseThuBaoTuBody_(plainText) {
   });
 
   var soLoRow = findRowByLabel_(rows, /^so\s*lo\s*ky\s*hieu/);
+  // Nhiều mail Gmail xuất MỖI Ô BẢNG 1 DÒNG riêng (không có tab/khoảng trắng kép) — hàng "Số lô ký
+  // hiệu" khi đó chỉ còn đúng ô nhãn, các số lô nằm ở những dòng tiếp theo. Dựng lại các hàng bằng
+  // cách gom mọi dòng sau 1 nhãn cột cho tới nhãn cột kế tiếp (form mail xưởng, cập nhật 2026-09).
+  if (!soLoRow || soLoRow.length < 2) {
+    var vRows = rowsFromOneCellPerLine_(lines);
+    if (findRowByLabel_(vRows, /^so\s*lo\s*ky\s*hieu/)) rows = vRows;
+  }
+  soLoRow = findRowByLabel_(rows, /^so\s*lo\s*ky\s*hieu/);
   if (!soLoRow) return null;
 
   var prodHeaderIdx = -1;
@@ -135,20 +167,17 @@ function parseThuBaoTuBody_(plainText) {
   var ngayThuRow = findRowByLabel_(rows, /^ngay\s*thu/);
   var nguoiThuRow = findRowByLabel_(rows, /^nguoi\s*thu/);
   var phRow = findRowByLabel_(rows, /^ph$/);
-  var camQuanRow = findRowByLabel_(rows, /^cam\s*quan/);
   var vDichRow = findRowByLabel_(rows, /the\s*tich.*thu\s*duoc/);
   var batThuongRow = findRowByLabel_(rows, /^bat\s*thuong/);
 
   var soLoList = soLoRow.slice(1);
   var phList = phRow ? phRow.slice(1) : [];
-  var camQuanList = camQuanRow ? camQuanRow.slice(1) : [];
   var vDichList = vDichRow ? vDichRow.slice(1) : [];
 
   var bottles = soLoList.filter(function (s) { return s; }).map(function (soLo, idx) {
     return {
       so_lo: soLo,
       ph: firstNumber_(phList[idx]),
-      cam_quan: camQuanList[idx] || "",
       v_dich: firstNumber_(vDichList[idx]),
     };
   });
@@ -162,13 +191,12 @@ function parseThuBaoTuBody_(plainText) {
     var re = /([0-9A-Za-z.\-]+)\s*=\s*([\d.,]+)\s*L/gi;
     var m2;
     var fallbackPh = bottles.length ? bottles[0].ph : null;
-    var fallbackCamQuan = bottles.length ? bottles[0].cam_quan : "";
     while ((m2 = re.exec(text2))) {
       var soLo2 = m2[1], vol2 = num_(m2[2]);
       var existing = null;
       for (var k = 0; k < bottles.length; k++) if (bottles[k].so_lo === soLo2) { existing = bottles[k]; break; }
       if (existing) existing.v_dich = vol2;
-      else bottles.push({ so_lo: soLo2, ph: fallbackPh, cam_quan: fallbackCamQuan, v_dich: vol2 });
+      else bottles.push({ so_lo: soLo2, ph: fallbackPh, v_dich: vol2 });
     }
   }
 
@@ -210,7 +238,7 @@ function parseThuBaoTuBody_(plainText) {
       row.ph = p.ph;
       row.ph_invalid = p.ph_invalid;
     }
-    if (b.cam_quan) row.cam_quan = b.cam_quan;
+    // Cảm quan KHÔNG lấy từ mail nữa — QC tự chọn Đạt/Không đạt trên web (chốt NCV 2026-09).
     if (ghiChu) row.ghi_chu = ghiChu;
     out.push(row);
   });
@@ -392,7 +420,8 @@ function runThuBaoTuScan_() {
         // Không tách được bảng dữ liệu (định dạng lạ) — không phải lỗi tạm thời,
         // thử lại cũng không tự khác đi được, nên chuyển thẳng sang Lỗi luôn.
         errorLabel.addToThread(thread);
-        failed.push(thread.getFirstMessageSubject() + ": không nhận diện được bảng dữ liệu, cần nhập tay.");
+        var sample = String(sourceMessages[0].getPlainBody() || "").slice(0, 400);
+        failed.push(thread.getFirstMessageSubject() + ": không nhận diện được bảng dữ liệu, cần nhập tay. Mẫu nội dung: " + JSON.stringify(sample));
       }
     } catch (err) {
       // Lỗi khi gọi Supabase (vd tạm thời mất kết nối) — CHỦ Ý KHÔNG gắn nhãn
@@ -428,6 +457,14 @@ function sendThuBaoTuReport_(subject, body, toEmailOverride, htmlBody) {
   var options = htmlBody ? { htmlBody: htmlBody } : {};
   var sent = GmailApp.createDraft(toEmail, subject, body, options).send();
   reportLabel.addToThread(sent.getThread());
+}
+
+// Sau khi sửa bộ đọc mail: gỡ nhãn "Thu bào tử/Lỗi" khỏi các mail cũ rồi quét lại 1 lần (mặc định
+// mail nhãn Lỗi bị bỏ qua vĩnh viễn). Chạy tay 1 lần từ Apps Script editor.
+function retryErrorThreads() {
+  var errorLabel = GmailApp.getUserLabelByName(THU_LABEL_ERROR);
+  if (errorLabel) errorLabel.getThreads(0, 100).forEach(function (t) { t.removeLabel(errorLabel); });
+  scanThuBaoTu();
 }
 
 // Chạy tay từ Apps Script editor (chọn hàm này > Run) để test, hoặc theo lịch
