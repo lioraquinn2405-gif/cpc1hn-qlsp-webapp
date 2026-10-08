@@ -2636,44 +2636,76 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
     return { ...prev, [rowKey]: rest };
   });
   const isOverridden = (rowKey, field) => rowOverrides[rowKey]?.[field] !== undefined;
+  // 4 cột xử lý hiển thị/sửa theo CẢ MẺ (1 ô cho cả mẻ): sửa 1 lần áp cho mọi lô trong mẻ.
+  const meValue = (g, field, globalValue) => rowValue(g.items[0].key, field, globalValue);
+  const setMeValue = (g, field, val) => g.items.forEach((r) => setRowValue(r.key, field, val));
+  const clearMeValue = (g, field) => g.items.forEach((r) => clearRowValue(r.key, field));
+  const isMeOverridden = (g, field) => g.items.some((r) => isOverridden(r.key, field));
 
+  // Tổng số ống của cả mẻ (làm tròn xuống như số ống thành phẩm) — để bộ phận kế hoạch lên lệnh nhanh.
+  const tongOngOf = (g) => Math.floor((g.tongTheTich * 1000) / sp.tubeMl + 1e-9);
   const headers = ["Mẻ pha", "Tổng thể tích mẻ (L)", "Tên nguyên liệu SX", "Số lô NL", "Định lượng (CFU/ml)",
     "Thể tích dịch tồn kho (L)", "Mật độ bào tử thành phẩm (CFU/ml)", "Thể tích 1 ống (ml)",
     "Thể tích dịch pha chế dự kiến (L)", "Thể tích lấy nước (L)", "Cỡ lô (ống)",
     "Xử lý nguyên liệu đầu vào", "Xử lý BTP sau pha", "Xử lý BTP sau đóng ống", "Quy trình xử lý khác nếu có",
     "Mã hóa mẻ in trên thân ống", "Chốt hướng xử lý hoàn thiện"];
 
+  // Bảng COPY gửi mail theo đúng mẫu phòng Kế hoạch/QA đang dùng: đầu bảng xanh cyan (cột "Thể tích dịch"
+  // xanh lá), các mẻ liền nhau tô màu xen kẽ trắng / vàng nhạt, mọi cột thuộc về cả mẻ (thể tích mẻ,
+  // thể tích 1 ống, thể tích pha dự kiến, cỡ lô, 4 cột xử lý, mã hóa, chốt hướng) gộp ô theo từng mẻ.
+  const mailHeaders = ["Mẻ pha", "Tổng thể tích mẻ (L)", "Tên nguyên liệu SX", "Số lô NL", "Định lượng (CFU/ml)",
+    "Thể tích dịch (L)", "Mật độ bào tử thành phẩm (CFU/ml)", "Thể tích 1 ống (ml)",
+    "Thể tích dịch pha chế dự kiến (L)", "Cỡ lô (ống)",
+    "Xử lý nguyên liệu đầu vào", "Xử lý BTP sau pha", "Xử lý BTP sau đóng ống", "Quy trình xử lý khác nếu có",
+    "Mã hóa mẻ in trên thân ống", "Chốt hướng xử lý hoàn thiện"];
+  const GREEN_COL = 5; // "Thể tích dịch (L)" — tô xanh lá như mẫu
+  // Độ rộng cố định (px) từng cột + table-layout:fixed: nếu không Gmail/Outlook tự ép bảng vừa khung đọc mail
+  // làm các cột bị bóp, chữ rớt dòng từng chữ. Bảng rộng hơn khung thì mail tự có thanh cuộn ngang.
+  const MAIL_COL_W = [60, 90, 170, 150, 110, 95, 130, 85, 130, 100, 120, 110, 140, 190, 140, 150];
+  const MAIL_FONT = "font-family:'Times New Roman',serif;font-size:13px";
+  const escHtml = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
   const copyTable = async () => {
     const bodyHtmlRows = [];
-    const textLines = [headers.join("\t")];
+    const textLines = [mailHeaders.join("\t")];
     batchGroups.forEach((g, gi) => {
       const maHoaMe = maHoaMeFor(g.meSo, gi);
       const chotHuong = chotHuongFinalFor(g.meSo);
       const meNo = meDisplayNo(gi);
+      const bg = gi % 2 === 1 ? "#fff2cc" : "#ffffff";
+      const cell = (v, span, extra = "") => `<td${span > 1 ? ` rowspan="${span}"` : ""} style="border:1px solid #000;padding:4px 6px;text-align:center;vertical-align:middle;background:${bg};${MAIL_FONT};${extra}">${escHtml(v)}</td>`;
+      const nw = "white-space:nowrap;";
+      const n = g.items.length;
       if (sterilizeBeforeFor(g, gi)) {
-        bodyHtmlRows.push(`<tr><td colspan="${headers.length}" align="center"><b>${VE_SINH_TIET_TRUNG_LABEL}</b></td></tr>`);
-        textLines.push([VE_SINH_TIET_TRUNG_LABEL, ...Array(headers.length - 1).fill("")].join("\t"));
+        bodyHtmlRows.push(`<tr><td colspan="${mailHeaders.length}" style="border:1px solid #000;padding:4px;text-align:center;background:#f9cb9c;font-weight:bold;${MAIL_FONT}">${VE_SINH_TIET_TRUNG_LABEL}</td></tr>`);
+        textLines.push([VE_SINH_TIET_TRUNG_LABEL, ...Array(mailHeaders.length - 1).fill("")].join("\t"));
       }
+      // 4 cột xử lý: gộp ô cả mẻ khi mọi lô trong mẻ cùng giá trị, khác nhau (NCV sửa riêng 1 lô) thì để từng dòng.
+      const procFields = [["xuLyDauVao", xuLyDauVao], ["xuLySauPha", xuLySauPha], ["sauDongOng", sauDongOngFinal], ["quyTrinhKhac", quyTrinhKhacFinal]];
+      const procVals = procFields.map(([f, gv]) => g.items.map((r) => rowValue(r.key, f, gv)));
+      const procMerged = procVals.map((vals) => vals.every((v) => v === vals[0]));
       g.items.forEach((r, ri) => {
-        const common = [
-          tenNguyenLieuFor(r.chung, sp), r.maLo, sci(r.E), fmt(r.vRaw, 2), sci(r.d), String(sp.tubeMl),
-          fmt(r.vPha, 2), fmt(r.vNuoc, 2), String(Math.round(r.soOng)),
-          rowValue(r.key, "xuLyDauVao", xuLyDauVao), rowValue(r.key, "xuLySauPha", xuLySauPha),
-          rowValue(r.key, "sauDongOng", sauDongOngFinal), rowValue(r.key, "quyTrinhKhac", quyTrinhKhacFinal),
-        ];
-        const htmlCells = [];
-        if (ri === 0) {
-          htmlCells.push(`<td rowspan="${g.items.length}">${meNo}</td>`, `<td rowspan="${g.items.length}">${fmt(g.tongTheTich, 2)}</td>`);
-        }
-        htmlCells.push(...common.map((c) => `<td>${c}</td>`));
-        if (ri === 0) {
-          htmlCells.push(`<td rowspan="${g.items.length}">${maHoaMe}</td>`, `<td rowspan="${g.items.length}">${chotHuong}</td>`);
-        }
-        bodyHtmlRows.push(`<tr>${htmlCells.join("")}</tr>`);
-        textLines.push([ri === 0 ? meNo : "", ri === 0 ? fmt(g.tongTheTich, 2) : "", ...common, ri === 0 ? maHoaMe : "", ri === 0 ? chotHuong : ""].join("\t"));
+        const cells = [];
+        if (ri === 0) cells.push(cell(meNo, n, nw), cell(fmt(g.tongTheTich, 2), n, nw));
+        cells.push(cell(tenNguyenLieuFor(r.chung, sp), 1), cell(r.maLo, 1, nw), cell(sci(r.E), 1, nw), cell(fmt(r.vRaw, 2), 1, nw), cell(sci(r.d), 1, nw));
+        if (ri === 0) cells.push(cell(String(sp.tubeMl), n, nw), cell(fmt(g.tongTheTich, 2), n, nw), cell(fmt(tongOngOf(g), 0), n, nw));
+        procVals.forEach((vals, k) => {
+          if (procMerged[k]) { if (ri === 0) cells.push(cell(vals[0], n)); }
+          else cells.push(cell(vals[ri], 1));
+        });
+        if (ri === 0) cells.push(cell(maHoaMe, n), cell(chotHuong, n));
+        bodyHtmlRows.push(`<tr>${cells.join("")}</tr>`);
+        textLines.push([
+          ri === 0 ? meNo : "", ri === 0 ? fmt(g.tongTheTich, 2) : "",
+          tenNguyenLieuFor(r.chung, sp), r.maLo, sci(r.E), fmt(r.vRaw, 2), sci(r.d),
+          ri === 0 ? String(sp.tubeMl) : "", ri === 0 ? fmt(g.tongTheTich, 2) : "", ri === 0 ? fmt(tongOngOf(g), 0) : "",
+          ...procVals.map((vals, k) => (procMerged[k] ? (ri === 0 ? vals[0] : "") : vals[ri])),
+          ri === 0 ? maHoaMe : "", ri === 0 ? chotHuong : "",
+        ].join("\t"));
       });
     });
-    const html = `<table border="1" cellspacing="0" cellpadding="4"><thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${bodyHtmlRows.join("")}</tbody></table>`;
+    const th = (h, i) => `<th width="${MAIL_COL_W[i]}" style="width:${MAIL_COL_W[i]}px;min-width:${MAIL_COL_W[i]}px;border:1px solid #000;padding:4px 6px;text-align:center;vertical-align:middle;background:${i === GREEN_COL ? "#00ff00" : "#00ffff"};${MAIL_FONT}">${escHtml(h)}</th>`;
+    const html = `<table cellspacing="0" cellpadding="0" width="${MAIL_COL_W.reduce((a, b) => a + b, 0)}" style="border-collapse:collapse;table-layout:fixed;width:${MAIL_COL_W.reduce((a, b) => a + b, 0)}px;${MAIL_FONT}"><thead><tr>${mailHeaders.map(th).join("")}</tr></thead><tbody>${bodyHtmlRows.join("")}</tbody></table>`;
     const text = textLines.join("\n");
     try {
       await navigator.clipboard.write([
@@ -2729,7 +2761,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
 
       <div className="overflow-x-auto bg-white border border-slate-200 rounded-md">
         <table className="w-full text-[11px] whitespace-nowrap">
-          <thead className="bg-slate-50 text-slate-400 text-left"><tr>{headers.map((h, i) => <th key={i} className="px-2 py-1.5 font-medium">{h}</th>)}</tr></thead>
+          <thead className="bg-slate-300 text-black text-left"><tr>{headers.map((h, i) => <th key={i} className="px-2 py-2 font-bold">{h}</th>)}</tr></thead>
           <tbody>
             {batchGroups.map((g, gi) => {
               const rowBg = gi % 2 === 1 ? "bg-indigo-100/70" : "bg-white";
@@ -2751,57 +2783,65 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
                   </tr>
                 ))}
                 <tr className={`border-b border-slate-200 ${rowBg} ${ri === 0 && gi > 0 ? "border-t-2 border-t-slate-400" : ""}`}>
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-top">{meDisplayNo(gi)}</td>}
-                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 align-top">{fmt(g.tongTheTich, 2)}</td>}
+                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-middle text-center">{meDisplayNo(gi)}</td>}
+                  {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 align-middle text-center">{fmt(g.tongTheTich, 2)}</td>}
                   <td className="px-2 py-1">{tenNguyenLieuFor(r.chung, sp)}</td>
                   <td className="px-2 py-1 font-mono">{r.maLo}</td>
                   <td className="px-2 py-1">{sci(r.E)}</td>
                   <td className="px-2 py-1">{fmt(r.vRaw, 2)}</td>
                   <td className="px-2 py-1">{sci(r.d)}</td>
-                  <td className="px-2 py-1">{sp.tubeMl}</td>
-                  <td className="px-2 py-1">{fmt(r.vPha, 2)}</td>
-                  <td className="px-2 py-1">{fmt(r.vNuoc, 2)}</td>
-                  <td className="px-2 py-1">{Math.round(r.soOng)}</td>
-                  <td className="px-1 py-1">
-                    <div className="flex items-center gap-0.5">
-                      <input value={rowValue(r.key, "xuLyDauVao", xuLyDauVao)} onChange={(e) => setRowValue(r.key, "xuLyDauVao", e.target.value)}
-                        className={`w-full text-[11px] border rounded px-1 py-1 ${isOverridden(r.key, "xuLyDauVao") ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
-                      {isOverridden(r.key, "xuLyDauVao") && <button onClick={() => clearRowValue(r.key, "xuLyDauVao")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
-                    </div>
-                  </td>
-                  <td className="px-1 py-1">
-                    <div className="flex items-center gap-0.5">
-                      <input value={rowValue(r.key, "xuLySauPha", xuLySauPha)} onChange={(e) => setRowValue(r.key, "xuLySauPha", e.target.value)}
-                        className={`w-full text-[11px] border rounded px-1 py-1 ${isOverridden(r.key, "xuLySauPha") ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
-                      {isOverridden(r.key, "xuLySauPha") && <button onClick={() => clearRowValue(r.key, "xuLySauPha")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
-                    </div>
-                  </td>
-                  <td className="px-1 py-1">
-                    <div className="flex items-start gap-0.5">
-                      <RowProcessSelect options={XU_LY_SAU_DONG_ONG_OPTIONS} value={rowValue(r.key, "sauDongOng", sauDongOngFinal)}
-                        onChange={(v) => setRowValue(r.key, "sauDongOng", v)} />
-                      {isOverridden(r.key, "sauDongOng") && <button onClick={() => clearRowValue(r.key, "sauDongOng")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
-                    </div>
-                  </td>
-                  <td className="px-1 py-1">
-                    <div className="flex items-start gap-0.5">
-                      <RowProcessSelect options={QUY_TRINH_KHAC_OPTIONS} value={rowValue(r.key, "quyTrinhKhac", quyTrinhKhacFinal)}
-                        onChange={(v) => setRowValue(r.key, "quyTrinhKhac", v)} />
-                      {isOverridden(r.key, "quyTrinhKhac") && <button onClick={() => clearRowValue(r.key, "quyTrinhKhac")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
-                    </div>
-                  </td>
                   {ri === 0 && (
-                    <td rowSpan={g.items.length} className="px-1 py-1 align-top">
-                      <div className="flex items-start gap-0.5">
+                    <>
+                      <td rowSpan={g.items.length} className="px-2 py-1 align-middle text-center">{sp.tubeMl}</td>
+                      <td rowSpan={g.items.length} className="px-2 py-1 align-middle text-center">{fmt(g.tongTheTich, 2)}</td>
+                      <td rowSpan={g.items.length} className="px-2 py-1 align-middle text-center">{fmt(g.items.reduce((sum, x) => sum + x.vNuoc, 0), 2)}</td>
+                      <td rowSpan={g.items.length} className="px-2 py-1 align-middle text-center font-medium">{fmt(tongOngOf(g), 0)}</td>
+                    </>
+                  )}
+                  {ri === 0 && (
+                    <>
+                      <td rowSpan={g.items.length} className="px-1 py-1 align-middle">
+                        <div className="flex items-center gap-0.5">
+                          <input value={meValue(g, "xuLyDauVao", xuLyDauVao)} onChange={(e) => setMeValue(g, "xuLyDauVao", e.target.value)}
+                            className={`w-full text-center text-[11px] border rounded px-1 py-1 ${isMeOverridden(g, "xuLyDauVao") ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
+                          {isMeOverridden(g, "xuLyDauVao") && <button onClick={() => clearMeValue(g, "xuLyDauVao")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                        </div>
+                      </td>
+                      <td rowSpan={g.items.length} className="px-1 py-1 align-middle">
+                        <div className="flex items-center gap-0.5">
+                          <input value={meValue(g, "xuLySauPha", xuLySauPha)} onChange={(e) => setMeValue(g, "xuLySauPha", e.target.value)}
+                            className={`w-full text-center text-[11px] border rounded px-1 py-1 ${isMeOverridden(g, "xuLySauPha") ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
+                          {isMeOverridden(g, "xuLySauPha") && <button onClick={() => clearMeValue(g, "xuLySauPha")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                        </div>
+                      </td>
+                      <td rowSpan={g.items.length} className="px-1 py-1 align-middle">
+                        <div className="flex items-center gap-0.5">
+                          <RowProcessSelect options={XU_LY_SAU_DONG_ONG_OPTIONS} value={meValue(g, "sauDongOng", sauDongOngFinal)}
+                            onChange={(v) => setMeValue(g, "sauDongOng", v)} />
+                          {isMeOverridden(g, "sauDongOng") && <button onClick={() => clearMeValue(g, "sauDongOng")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                        </div>
+                      </td>
+                      <td rowSpan={g.items.length} className="px-1 py-1 align-middle">
+                        <div className="flex items-center gap-0.5">
+                          <RowProcessSelect options={QUY_TRINH_KHAC_OPTIONS} value={meValue(g, "quyTrinhKhac", quyTrinhKhacFinal)}
+                            onChange={(v) => setMeValue(g, "quyTrinhKhac", v)} />
+                          {isMeOverridden(g, "quyTrinhKhac") && <button onClick={() => clearMeValue(g, "quyTrinhKhac")} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
+                        </div>
+                      </td>
+                    </>
+                  )}
+                  {ri === 0 && (
+                    <td rowSpan={g.items.length} className="px-1 py-1 align-middle">
+                      <div className="flex items-center gap-0.5">
                         <input value={maHoaMe} onChange={(e) => setMaHoaMeByMe((p) => ({ ...p, [g.meSo]: e.target.value }))}
-                          className={`w-full font-mono text-[11px] border rounded px-1 py-1 ${maHoaMeIsOverridden(g.meSo) ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
+                          className={`w-full text-center font-mono text-[11px] border rounded px-1 py-1 ${maHoaMeIsOverridden(g.meSo) ? "border-amber-300 bg-amber-50" : "border-slate-200"}`} />
                         {maHoaMeIsOverridden(g.meSo) && <button onClick={() => clearMaHoaMeForMe(g.meSo)} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
                       </div>
                     </td>
                   )}
                   {ri === 0 && (
-                    <td rowSpan={g.items.length} className="px-1 py-1 align-top">
-                      <div className="flex items-start gap-0.5">
+                    <td rowSpan={g.items.length} className="px-1 py-1 align-middle">
+                      <div className="flex items-center gap-0.5">
                         <RowProcessSelect options={CHOT_HUONG_OPTIONS} value={chotHuongFinalFor(g.meSo)}
                           onChange={(v) => setChotHuongByMe((p) => ({ ...p, [g.meSo]: v }))} />
                         {chotHuongIsOverridden(g.meSo) && <button onClick={() => clearChotHuongForMe(g.meSo)} title="Theo mặc định" className="text-slate-400 hover:text-slate-600 shrink-0">×</button>}
