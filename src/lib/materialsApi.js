@@ -10,7 +10,7 @@ const MATERIAL_FIELDS = [
   ["ghiChu", "ghi_chu"], ["meChe", "me_che"], ["daPha", "da_pha"], ["daPhaAt", "da_pha_at"],
   ["phaProduct", "pha_product"], ["phaMe", "pha_me"], ["loai", "loai"],
   ["phInvalid", "ph_invalid"], ["pendingDelete", "pending_delete"], ["deletedAt", "deleted_at"],
-  ["choSX", "cho_sx"], ["choSxAt", "cho_sx_at"], ["mixPlanId", "mix_plan_id"], ["mixPlanMeSo", "mix_plan_me_so"],
+  ["choSX", "cho_sx"], ["choSxAt", "cho_sx_at"], ["daGuiMailAt", "da_gui_mail_at"], ["mixPlanId", "mix_plan_id"], ["mixPlanMeSo", "mix_plan_me_so"],
   ["huyThuCong", "huy_thu_cong"], ["choXuLyThuCong", "cho_xu_ly_thu_cong"],
   ["createdBy", "created_by"], ["updatedBy", "updated_by"],
 ];
@@ -19,7 +19,7 @@ const PRODUCT_FIELDS = [
   ["thanhPhan", "thanh_phan"], ["hamLuong", "ham_luong"],
   ["tubeMl", "tube_ml"], ["soOngNhip", "so_ong_nhip"], ["ncv", "ncv"],
   ["pool2", "pool2"], ["hamLuong2", "ham_luong2"], ["thanhPhan2", "thanh_phan2"], ["allowOtherLoai", "allow_other_loai"],
-  ["sortOrder", "sort_order"],
+  ["sortOrder", "sort_order"], ["maHoaThanOng", "ma_hoa_than_ong"],
 ];
 
 const toCamel = (fields) => (row) =>
@@ -31,8 +31,10 @@ const materialToCamel = toCamel(MATERIAL_FIELDS);
 const materialSnakeKey = toSnakeKey(MATERIAL_FIELDS);
 const productToCamel = toCamel(PRODUCT_FIELDS);
 const productSnakeKey = toSnakeKey(PRODUCT_FIELDS);
+// ma_hoa_than_ong (migration_products_ma_hoa_than_ong.sql) chỉ gửi khi có giá trị — để thêm SP vẫn chạy
+// được ở DB chưa chạy migration.
 const productToSnake = (p) =>
-  Object.fromEntries(PRODUCT_FIELDS.map(([camel, snake]) => [snake, p[camel]]));
+  Object.fromEntries(PRODUCT_FIELDS.filter(([camel]) => camel !== "maHoaThanOng" || p[camel]).map(([camel, snake]) => [snake, p[camel]]));
 
 const PAGE_SIZE = 1000;
 

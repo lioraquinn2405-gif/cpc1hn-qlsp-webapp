@@ -13,7 +13,6 @@ import {
   TANK_MAX_L,
   MAX_LOTS_PER_BATCH,
   MIN_LOT_FRAGMENT_L,
-  MAX_CLOSING_OVERSHOOT,
 } from "../src/lib/mixPlanner.js";
 
 let passCount = 0;
@@ -192,16 +191,16 @@ console.log("\n=== 6. planTwoComponent - kho subtilis quá ít (kỳ vọng infe
   check("feasible = false khi kho subtilis quá ít", plan.feasible === false, JSON.stringify(plan));
 }
 
-console.log("\n=== 7. planTwoComponent - kho 2 chủng lệch tỉ lệ nặng (kỳ vọng KHÔNG còn NL dư, chấp nhận sản lượng dư) ===");
+console.log("\n=== 7. planTwoComponent - kho 2 chủng lệch tỉ lệ nặng (kỳ vọng KHÔNG dư NL, KHÔNG dư mật độ) ===");
 {
-  // Nhiều lô sản xuất nhỏ xen kẽ, kích cỡ chai/mật độ 2 chủng KHÔNG khớp nhau. NCV chốt lại
-  // 2026-07-29: tuyệt đối không được để dư NL (nhất là clausii) dù T dư ra bao nhiêu — bỏ hẳn
-  // trần MAX_CLOSING_OVERSHOOT đã thêm trước đó (chỉ 1 ngày trước), UI hiển thị cảnh báo dư sản
-  // lượng cho NCV tự quyết định thay vì thuật toán tự ý dừng sớm bỏ dở NL.
+  // Nhiều lô sản xuất nhỏ xen kẽ, kích cỡ chai/mật độ 2 chủng KHÔNG khớp nhau. Chốt lại với NCV
+  // 2026-10-08 (thay chốt 2026-07-29 cũ): KHÔNG còn chấp nhận "dồn mật độ" khi vướng trần nữa — trần
+  // sản lượng hạ xuống +10% và khi 1 lô clausii không đóng nốt được trong
+  // trần đó, thuật toán LÙI lại (không mở lô đó) thay vì ép dùng rồi chấp nhận mật độ sai lệch nặng.
   const gSubtilis = 4.0e8;
   const gClausii = 2.4e8;
   const H = 5.3;
-  const N = 500_000;
+  const N = 420_000; // hạ từ 500.000 (bản cũ) — ở N đó giờ lô cuối không đóng nốt nổi trong trần +10%, LÙI về dưới sàn 90% -> infeasible (đúng hành vi mới, xem test 14/15 cho ca "thiếu subtilis" tương tự).
   const makeLots = (prefix, nLoSanXuat, chaiPerLo, F, E) => {
     const lots = [];
     for (let lo = 1; lo <= nLoSanXuat; lo++) {
@@ -218,6 +217,10 @@ console.log("\n=== 7. planTwoComponent - kho 2 chủng lệch tỉ lệ nặng (
   if (plan.feasible) {
     check("dSubtilis >= gSubtilis", plan.dSubtilis >= gSubtilis - EPStest());
     check("dClausii >= gClausii", plan.dClausii >= gClausii - EPStest());
+    // Mật độ KHÔNG còn được phép dư nặng nữa (khác bản cũ) — phải sát đích ở mọi mẻ, không riêng gì
+    // trung bình cả nhịp (vd đã từng thấy 1 mẻ dư >400% dù trung bình nhịp vẫn bình thường).
+    check("dSubtilis sát đích, không dư quá 10%", plan.dSubtilis <= gSubtilis * 1.1 + EPStest(), plan.dSubtilis.toExponential(3));
+    check("dClausii sát đích, không dư quá 10%", plan.dClausii <= gClausii * 1.1 + EPStest(), plan.dClausii.toExponential(3));
     console.log(`  -> N=${fmt(N)}, T=${fmt(plan.T)} (${(plan.T / N).toFixed(2)}x N), ${plan.batches.length} mẻ, totalV=${fmt(plan.totalV, 1)}L`);
 
     // Nguyên tắc 4 (2026-07-29, bất đối xứng): CLAUSII đã chạm tới phải dùng ĐÚNG HẾT 100% — LUÔN
@@ -366,7 +369,7 @@ console.log("\n=== 10. planTwoComponent - tránh mẩu NL vụn khi tách lô (S
   // nguyên nhân gốc là EPS=1e-6 (thiết kế cho so sánh thể tích) bị dùng nhầm để so sánh CFU (quy mô
   // 10^13-10^17), khiến nhiễu số học bị hiểu nhầm là "còn nguyên 1 lô dở dang" (đã sửa bằng cfuEps
   // tương đối). Giờ mỗi lô subtilis phải được dùng TRỌN VẸN trong đúng 1 mẻ, không còn mẩu vụn.
-  // N chọn đủ lớn để đóng tự nhiên (không cần "dọn nốt" xa) KHÔNG chạm trần MAX_CLOSING_OVERSHOOT —
+  // N chọn đủ lớn để đóng tự nhiên (không cần "dọn nốt" xa) KHÔNG chạm trần sản lượng —
   // xem test 11 riêng cho đúng ca N nhỏ hơn, khi trần và né-mẩu-vụn xung đột (trần thắng).
   // Lô 010526SF1.C1 cố ý để F=20L (thay vì 10L) — đủ để TOÀN BỘ kho subtilis (3.728,25L) vượt hẳn
   // tổng kho clausii (3.198,75L nếu dùng hết cả 3 lô), tránh đụng nhánh "thiếu subtilis" MỚI (nguyên
@@ -397,14 +400,16 @@ console.log("\n=== 10. planTwoComponent - tránh mẩu NL vụn khi tách lô (S
   }
 }
 
-console.log("\n=== 11. planTwoComponent - trần overshoot LUÔN thắng khi xung đột với né-mẩu-vụn ===");
+console.log("\n=== 11. planTwoComponent - lô clausii không đóng nốt nổi trong trần +10% -> LÙI lại, KHÔNG dồn mật độ ===");
 {
-  // Cùng bộ dữ liệu như test 10 (F gốc, KHÔNG bump subtilis) nhưng N NHỎ hơn nhiều — khiến điểm
-  // đóng tự nhiên CHỈ RIÊNG clausii (đóng nốt đúng lô clausii đang dở, xem computeFinalTargetV mới)
-  // đã vượt xa 20% mục tiêu, TRONG KHI kho subtilis vẫn còn dư dả (không phải nguyên nhân) — cô lập
-  // đúng nhánh trần overshoot, tách biệt khỏi nhánh "thiếu subtilis" mới (xem test 14/15). NCV chốt
-  // rõ 2026-07-29: trần sản lượng (+20%) là ưu tiên CAO HƠN việc né tuyệt đối mọi mẩu vụn — nếu 2
-  // điều đó xung đột, chấp nhận còn 1 mẩu <1L còn hơn phá vỡ trần (dồn mật độ CẢ 2 luồng, không đổi).
+  // Cùng bộ dữ liệu như test 10 (F gốc, KHÔNG bump subtilis) nhưng N nhỏ hơn nhiều — khiến điểm đóng
+  // tự nhiên CHỈ RIÊNG clausii (đóng nốt đúng lô clausii đang dở, xem computeFinalTargetV) vượt xa
+  // trần +10% mục tiêu, TRONG KHI kho subtilis vẫn còn dư dả (không phải nguyên nhân). Chốt lại với
+  // NCV 2026-10-08 (thay chốt 2026-07-29 cũ "dồn mật độ, trần sản lượng thắng tuyệt đối"): thuật toán
+  // giờ LÙI lại, không mở lô clausii không đóng nốt nổi — subtilis được phép dở dang nên luôn đủ "dư
+  // địa" khớp đúng mật độ đích ở bất kỳ V nào, không còn lý do kỹ thuật nào phải đánh đổi mật độ lấy
+  // sản lượng nữa (bug thật NCV báo: mẻ cuối dư mật độ gấp nhiều lần đích vì bị ép dùng hết 1 lô quá
+  // to so với đơn).
   const subtilisLots = [
     { maLo: "010426SF1.C4", E: 3.35e10, F: 10.0, loSanXuat: "010426SF1" },
     { maLo: "010426SF1.C5", E: 3.33e10, F: 10.0, loSanXuat: "010426SF1" },
@@ -416,32 +421,28 @@ console.log("\n=== 11. planTwoComponent - trần overshoot LUÔN thắng khi xun
     { maLo: "26G01SA1.C4", E: 3.02e10, F: 9.0, loSanXuat: "26G01SA1" },
     { maLo: "26G02SA1.C1", E: 2.60e10, F: 9.0, loSanXuat: "26G02SA1" },
   ];
-  const product = { N: 132_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
+  const product = { N: 190_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
   const plan = planTwoComponent({ subtilisLots, clausiiLots, product });
   check("feasible = true", plan.feasible === true, plan.reason || "");
   if (plan.feasible) {
-    check(`T (${fmt(plan.T)}) không vượt quá ~20% N (${fmt(product.N)})`, plan.T <= product.N * MAX_CLOSING_OVERSHOOT * 1.01);
-    // CLAUSII đã chạm tới vẫn phải dùng hết 100% (trần chỉ chặn THỂ TÍCH/nước, không cho phép bỏ dở
-    // clausii) — bắt buộc, không đổi. SUBTILIS thì KHÔNG còn bắt buộc nữa (nguyên tắc 4, 2026-07-29):
-    // trước đây bản cũ "dồn nốt không thêm nước" ép luôn CẢ subtilis cho hết chai đang dở — nay CHỈ
-    // dồn clausii, subtilis được PHÉP dở dang (chính là bug thật NCV báo khi test trên UI: mẻ cuối dư
-    // mật độ subtilis rất nặng dù không cần thiết, vì bị ép vét sạch 1 chai không liên quan tới trần).
-    const checkFullyUsed = (lots, streamKey) => {
+    // CLAUSII đã chạm tới vẫn phải dùng hết 100% (nguyên tắc 4, không đổi) — nhưng lô nào KHÔNG đóng
+    // nốt nổi trong trần thì giờ đơn giản là KHÔNG bị chạm tới nữa (thay vì chạm rồi dồn mật độ).
+    const checkFullyUsedOrUntouched = (lots, streamKey) => {
       const byMaLo = Object.fromEntries(lots.map((l) => [l.maLo, l]));
       const used = {};
       plan.batches.forEach((b) => b[streamKey].forEach((e) => { used[e.maLo] = (used[e.maLo] || 0) + e.theTichRaw; }));
       return Object.entries(used).every(([maLo, sumUsed]) => sumUsed >= (byMaLo[maLo]?.F ?? sumUsed) - EPStest());
     };
-    check("mọi lô clausii đã chạm tới vẫn dùng hết 100%", checkFullyUsed(clausiiLots, "clausii"));
-    // Mật độ subtilis TRUNG BÌNH cả nhịp không được dư quá đà chỉ vì trần overshoot chặn clausii —
-    // nếu subtilis vẫn còn bị "vét sạch" không cần thiết, mật độ sẽ vọt cao bất thường (bug vừa sửa
-    // ra đúng d~5.95e8, +49% so với đích 4e8, trước khi sửa) — sau sửa phải sát đích hơn hẳn.
-    check("mật độ subtilis KHÔNG dư quá đà (< +10%) dù bị trần overshoot chặn clausii", plan.dSubtilis <= 4.0e8 * 1.1, `dSubtilis=${plan.dSubtilis.toExponential(3)}`);
+    check("mọi lô clausii đã chạm tới vẫn dùng hết 100%", checkFullyUsedOrUntouched(clausiiLots, "clausii"));
+    // Mật độ CẢ HAI luồng giờ luôn sát đích (không còn "dồn CFU không thêm nước" nữa) — khác hẳn bản
+    // cũ chỉ assert riêng subtilis (vì bản cũ CHỦ Ý để clausii dư mật độ, đúng cơ chế vừa bỏ).
+    check("mật độ subtilis sát đích (không dư quá 10%)", plan.dSubtilis <= 4.0e8 * 1.1 + EPStest(), `dSubtilis=${plan.dSubtilis.toExponential(3)}`);
+    check("mật độ clausii sát đích (không dư quá 10%)", plan.dClausii <= 2.4e8 * 1.1 + EPStest(), `dClausii=${plan.dClausii.toExponential(3)}`);
     console.log(`  -> N=${fmt(product.N)}, T=${fmt(plan.T)} (${(plan.T / product.N).toFixed(2)}x N), ${plan.batches.length} mẻ`);
   }
 }
 
-console.log("\n=== 12. planTwoComponent - ghép cân đối (findBestMatchedLots) khi kích cỡ chai 2 chủng lệch nhau ===");
+console.log("\n=== 12. planTwoComponent - ghép cân đối khi kích cỡ chai 2 chủng lệch nhau ===");
 {
   // Chai subtilis to (10L, V=1000L/chai) trong khi chai clausii nhỏ hơn (5L, V=500L/chai, cần đúng
   // 2 chai clausii mới khớp 1 chai subtilis) — mô phỏng đúng ca NCV phàn nàn 2026-07-29: "mẻ thì
@@ -495,7 +496,7 @@ console.log("\n=== 13. planTwoComponent - làm tròn 1 mẻ KHÔNG được 'ăn
     { maLo: "CB4", E: 3.0e10, F: 9.0, loSanXuat: "LSX-B4" },
     { maLo: "CB5", E: 2.7e10, F: 8.0, loSanXuat: "LSX-B5" },
   ];
-  const product = { N: 600_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
+  const product = { N: 500_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 }; // hạ từ 600.000 (bản cũ) — ở N đó trần +10% mới (thay +20% cũ) khiến lô cuối không đóng nốt nổi, thuật toán LÙI lại và tụt dưới sàn 90% (đúng hành vi mới, xem test 11/14).
   const plan = planTwoComponent({ subtilisLots, clausiiLots, product });
   check("feasible = true", plan.feasible === true, plan.reason || "");
   if (plan.feasible) {
@@ -506,13 +507,12 @@ console.log("\n=== 13. planTwoComponent - làm tròn 1 mẻ KHÔNG được 'ăn
   }
 }
 
-console.log("\n=== 14. planTwoComponent - kho subtilis KHÔNG đủ để đóng nốt lô clausii -> infeasible, KHÔNG dồn mật độ để né (nguyên tắc 4) ===");
+console.log("\n=== 14. planTwoComponent - kho subtilis KHÔNG đủ để dùng thêm chai clausii gần N hơn -> vẫn ra kế hoạch gần nhất có thể, báo đúng chai bị kẹt ===");
 {
-  // Kho gốc chưa bump (giống hệt test 11): subtilisTotalCap ~3.065,75L < tổng 3 lô clausii nếu dùng
-  // hết cả 3 (~3.198,75L). Chọn N để vTarget rơi đúng vào GIỮA lô clausii thứ 3 (26G02SA1.C1) — lô
-  // này sẽ bị "kẹt": không đủ subtilis để đóng nốt trọn vẹn. Chốt NCV (không phải "dồn mật độ" như
-  // trần overshoot): LÙI hẳn về ranh giới lô clausii SẠCH gần nhất (2 lô đầu, ~2.223,75L) — ở N này
-  // mức đó rơi DƯỚI sàn 90% -> phải báo infeasible, không được tự ý dồn mật độ để cố đạt N.
+  // Chốt NCV 2026-10-08: chốt cứng các chai clausii NGUYÊN VẸN cho sản lượng gần N nhất. Kho subtilis
+  // (~3.068L) không đủ để dùng thêm chai 26G02SA1.C1 (lẽ ra đưa sản lượng sát N hơn) -> dừng ở 2 chai
+  // đầu, KHÔNG mở dở chai thứ 3, KHÔNG dồn mật độ — vẫn trả kế hoạch (T thấp hơn hẳn N) kèm
+  // subtilisShortfallLot để UI cảnh báo NCV bổ sung subtilis.
   const subtilisLots = [
     { maLo: "010426SF1.C4", E: 3.35e10, F: 10.0, loSanXuat: "010426SF1" },
     { maLo: "010426SF1.C5", E: 3.33e10, F: 10.0, loSanXuat: "010426SF1" },
@@ -524,49 +524,46 @@ console.log("\n=== 14. planTwoComponent - kho subtilis KHÔNG đủ để đóng
     { maLo: "26G01SA1.C4", E: 3.02e10, F: 9.0, loSanXuat: "26G01SA1" },
     { maLo: "26G02SA1.C1", E: 2.60e10, F: 9.0, loSanXuat: "26G02SA1" },
   ];
-  const product = { N: 490_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
+  const product = { N: 600_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
   const plan = planTwoComponent({ subtilisLots, clausiiLots, product });
-  check("feasible = false (kho subtilis không đủ để đóng nốt lô clausii cần tới)", plan.feasible === false, JSON.stringify(plan));
-  if (plan.feasible === false) {
+  check("feasible = true (vẫn ra kế hoạch gần nhất có thể)", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
     check("báo đúng lô clausii bị kẹt (26G02SA1.C1)", plan.subtilisShortfallLot === "26G02SA1.C1", plan.subtilisShortfallLot);
-    check("lý do nêu rõ từ khoá 'thiếu subtilis'/'dở dang'", /subtilis|dở dang/i.test(plan.reason || ""), plan.reason);
+    check("T thấp hơn hẳn N (không cố ép đạt đủ)", plan.T < 0.9 * product.N, `T=${plan.T}`);
+    check("chai bị kẹt KHÔNG bị đụng tới (0% dùng, không dở dang)", !plan.selectedClausiiLots.includes("26G02SA1.C1"), JSON.stringify(plan.selectedClausiiLots));
+    const byMaLo = Object.fromEntries(clausiiLots.map((l) => [l.maLo, l]));
+    const used = {};
+    plan.batches.forEach((b) => b.clausii.forEach((e) => { used[e.maLo] = (used[e.maLo] || 0) + e.theTichRaw; }));
+    check("mọi chai clausii đã dùng đều dùng ĐÚNG HẾT 100%", Object.entries(used).every(([m, f]) => Math.abs(f - byMaLo[m].F) < EPStest()), JSON.stringify(used));
   }
 }
 
-console.log("\n=== 15. planTwoComponent - thiếu subtilis: vẫn feasible nhưng T thấp hơn N, clausii vẫn KHÔNG bị dở dang (nguyên tắc 4) ===");
+console.log("\n=== 15. planTwoComponent - chai clausii bị kho subtilis chặn nhưng đằng nào cũng xa N hơn -> KHÔNG báo nhầm thiếu subtilis ===");
 {
-  // Cùng bộ kho như test 14 nhưng N nhỏ hơn 1 chút — mức "lùi về ranh giới sạch" (~2.223,75L, dùng
-  // đúng 2/3 lô clausii) giờ vẫn NẰM TRÊN sàn 90% -> feasible, nhưng T thấp hơn hẳn N (không cố đạt
-  // đủ N bằng cách mở dở lô clausii thứ 3) — đúng chốt NCV: dừng sớm hơn, báo rõ, không tự quyết.
+  // CL1+CL2 = 2.250L sát mục tiêu (~2.438L) hơn hẳn CL1+CL2+CL3 = 3.375L — dù kho subtilis (2.625L)
+  // cũng không đủ cho CL3, đó KHÔNG phải lý do dừng (phương án gần N nhất vốn đã là 2 chai), nên không
+  // được cảnh báo "thiếu subtilis" gây hiểu nhầm.
   const subtilisLots = [
-    { maLo: "010426SF1.C4", E: 3.35e10, F: 10.0, loSanXuat: "010426SF1" },
-    { maLo: "010426SF1.C5", E: 3.33e10, F: 10.0, loSanXuat: "010426SF1" },
-    { maLo: "010426SF1.C7", E: 3.27e10, F: 9.0, loSanXuat: "010426SF1" },
-    { maLo: "010526SF1.C1", E: 2.65e10, F: 10.0, loSanXuat: "010526SF1" },
+    { maLo: "SU1", E: 3.0e10, F: 10.0, loSanXuat: "SU1" },
+    { maLo: "SU2", E: 3.0e10, F: 10.0, loSanXuat: "SU2" },
+    { maLo: "SU3", E: 3.0e10, F: 10.0, loSanXuat: "SU3" },
+    { maLo: "SU4", E: 3.0e10, F: 5.0, loSanXuat: "SU4" },
   ];
   const clausiiLots = [
-    { maLo: "26G01SA1.C3", E: 2.91e10, F: 9.0, loSanXuat: "26G01SA1" },
-    { maLo: "26G01SA1.C4", E: 3.02e10, F: 9.0, loSanXuat: "26G01SA1" },
-    { maLo: "26G02SA1.C1", E: 2.60e10, F: 9.0, loSanXuat: "26G02SA1" },
+    { maLo: "CL1", E: 3.0e10, F: 9.0, loSanXuat: "CL1" },
+    { maLo: "CL2", E: 3.0e10, F: 9.0, loSanXuat: "CL2" },
+    { maLo: "CL3", E: 3.0e10, F: 9.0, loSanXuat: "CL3" },
   ];
-  const product = { N: 452_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
+  const product = { N: 460_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 };
   const plan = planTwoComponent({ subtilisLots, clausiiLots, product });
   check("feasible = true", plan.feasible === true, plan.reason || "");
   if (plan.feasible) {
-    check("T thấp hơn hẳn N (dừng sớm, không cố ép đạt đủ)", plan.T < product.N, `T=${plan.T}, N=${product.N}`);
-    check("báo đúng lô clausii bị kẹt (26G02SA1.C1)", plan.subtilisShortfallLot === "26G02SA1.C1", plan.subtilisShortfallLot);
-    check("lô clausii bị kẹt KHÔNG xuất hiện trong danh sách đã dùng (0% dùng, không dở dang)",
-      !plan.selectedClausiiLots.includes("26G02SA1.C1"), JSON.stringify(plan.selectedClausiiLots));
-    // Mọi lô clausii ĐÃ dùng phải dùng ĐÚNG HẾT 100% (không có lô nào dùng 1 phần) — cốt lõi nguyên tắc 4.
-    const clausiiByMaLo = Object.fromEntries(clausiiLots.map((l) => [l.maLo, l]));
-    const usedClauF = {};
-    plan.batches.forEach((b) => b.clausii.forEach((e) => { usedClauF[e.maLo] = (usedClauF[e.maLo] || 0) + e.theTichRaw; }));
-    const clausiiFullyUsed = Object.entries(usedClauF).every(([maLo, f]) => Math.abs(f - clausiiByMaLo[maLo].F) < EPStest());
-    check("mọi lô clausii đã chạm tới đều dùng ĐÚNG HẾT 100% (không dở dang)", clausiiFullyUsed, JSON.stringify(usedClauF));
+    check("không báo nhầm thiếu subtilis", plan.subtilisShortfallLot === null, plan.subtilisShortfallLot);
+    check("dùng đúng 2 chai clausii gần N nhất (CL1, CL2)", JSON.stringify(plan.selectedClausiiLots.slice().sort()) === JSON.stringify(["CL1", "CL2"]), JSON.stringify(plan.selectedClausiiLots));
   }
 }
 
-console.log("\n=== 16. planTwoComponent - roundRawTwoStream KHÔNG được bỏ ngỏ cả 2 phần khi tách lô làm tròn khít nhau (dữ liệu thật NCV báo, 2026-07-29) ===");
+console.log("\n=== 16. planTwoComponent - mọi lần đong NL đều tròn 0.5L (dữ liệu thật NCV báo, 2026-07-29) ===");
 {
   // Bug thật: reserveForRest cũ dùng ĐÚNG lượng RAW chưa làm tròn của phần sau làm ngưỡng trần cho
   // phần trước -> ceiling khít đúng bằng raw hiện tại, không còn dư 1 bước 0.5L nào để làm tròn LÊN
@@ -640,6 +637,115 @@ console.log("\n=== 18. planSingleComponent - wholeBottleOnly=false (mặc địn
   check("không truyền wholeBottleOnly vẫn ra hành vi ghép mẻ như trước (có mẻ >1 lô)",
     plan.feasible && plan.batches.some((b) => b.lots.length > 1),
     JSON.stringify(plan.batches?.map((b) => b.lots.length)));
+}
+
+console.log("\n=== 19. planTwoComponent - 3 nguyên tắc NCV chốt 2026-10-08 (1 triệu ống, kho nhiều chai cỡ thật) ===");
+{
+  // 1. Chốt cứng chai clausii nguyên vẹn (tổ hợp bất kỳ) cho sản lượng GẦN N nhất, không chai nào dở.
+  // 2. Subtilis khớp đúng lượng đó — kho này có tổ hợp chai subtilis pha vừa hết nên không dở chai nào.
+  // 3. Không mẻ nào dưới 700L khi còn cách tránh được (kho này tránh được), ≤1080L, ≤3 chai/mẻ, mật
+  //    độ cả 2 chủng trong [đích, +5%], mọi lần đong tròn 0.5L.
+  const mk = (prefix, specs) => specs.map(([F, E], i) => ({ maLo: `${prefix}.C${i + 1}`, E, F, loSanXuat: `${prefix}${Math.floor(i / 4)}` }));
+  const subtilisLots = mk("010426SF", [[10, 3.35e10], [10, 3.33e10], [9, 3.27e10], [10, 2.65e10], [10, 3.1e10], [9, 3.2e10], [8, 2.9e10], [10, 3.0e10], [10, 3.2e10], [9, 2.8e10], [10, 3.3e10], [8, 3.1e10]]);
+  const clausiiLots = mk("26G01SA", [[9, 2.91e10], [9, 3.02e10], [9, 2.60e10], [8, 2.7e10], [9, 3.1e10], [7, 2.4e10], [9, 3.0e10], [8, 2.7e10], [9, 2.9e10], [9, 2.8e10]]);
+  const gSubtilis = 4.0e8, gClausii = 2.4e8, H = 5.3, N = 1_000_000;
+  const plan = planTwoComponent({ subtilisLots, clausiiLots, product: { N, H, gSubtilis, gClausii } });
+  check("feasible = true", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
+    const used = (key) => { const u = {}; plan.batches.forEach((b) => b[key].forEach((e) => { u[e.maLo] = (u[e.maLo] || 0) + e.theTichRaw; })); return u; };
+    const usedC = used("clausii"), usedS = used("subtilis");
+    const byC = Object.fromEntries(clausiiLots.map((l) => [l.maLo, l])), byS = Object.fromEntries(subtilisLots.map((l) => [l.maLo, l]));
+    check("mọi chai clausii đã dùng đều hết 100%", Object.entries(usedC).every(([m, f]) => Math.abs(f - byC[m].F) < EPStest()), JSON.stringify(usedC));
+    // Sản lượng clausii (thể tích pha ở mật độ đích) khớp N ít nhất bằng tiền tố FIFO tốt nhất, lệch ≤ 1%.
+    const vTarget = (N * H) / 1000;
+    let cum = 0, bestDist = Infinity;
+    clausiiLots.forEach((l) => { cum += (l.E * l.F) / gClausii; bestDist = Math.min(bestDist, Math.abs(cum - vTarget)); });
+    const vChosen = Object.keys(usedC).reduce((s, m) => s + (byC[m].E * byC[m].F) / gClausii, 0);
+    check("tổ hợp clausii khớp N tốt hơn/bằng FIFO, lệch ≤ 1%", Math.abs(vChosen - vTarget) <= bestDist + 1e-6 && Math.abs(vChosen - vTarget) <= 0.01 * vTarget, `vChosen=${vChosen} bestFifo=${bestDist}`);
+    const partialS = Object.entries(usedS).filter(([m, f]) => f < byS[m].F - EPStest());
+    check("subtilis pha vừa hết — không dở chai nào", partialS.length === 0, JSON.stringify(partialS));
+    check("T trong [0.99N, 1.01N]", plan.T >= 0.99 * N && plan.T <= 1.01 * N, `T=${plan.T}`);
+    check("không mẻ nào dưới 700L", plan.batches.every((b) => b.tongTheTich >= 700 - EPStest()), JSON.stringify(plan.batches.map((b) => b.tongTheTich)));
+    check("mọi mẻ ≤ TANK_MAX_L", plan.batches.every((b) => b.tongTheTich <= TANK_MAX_L + 1e-6));
+    check(`mọi mẻ ≤ ${MAX_LOTS_PER_BATCH} chai`, plan.batches.every((b) => b.subtilis.length + b.clausii.length <= MAX_LOTS_PER_BATCH));
+    let densOk = true;
+    plan.batches.forEach((b) => {
+      const dA = b.subtilis.reduce((s, e) => s + e.E * e.theTichRaw, 0) / b.tongTheTich;
+      const dB = b.clausii.reduce((s, e) => s + e.E * e.theTichRaw, 0) / b.tongTheTich;
+      if (dA < gSubtilis * (1 - 1e-9) || dA > gSubtilis * 1.05 || dB < gClausii * (1 - 1e-9) || dB > gClausii * 1.05) densOk = false;
+    });
+    check("mật độ cả 2 chủng mọi mẻ trong [đích, +5%]", densOk);
+    check("mọi lần đong NL tròn 0.5L", plan.batches.every((b) => [...b.subtilis, ...b.clausii].every((e) => Math.abs(e.theTichRaw / 0.5 - Math.round(e.theTichRaw / 0.5)) < 1e-9)));
+    console.log(`  -> T=${fmt(plan.T)} (${(plan.T / N).toFixed(3)}x N), ${plan.batches.length} mẻ: ${plan.batches.map((b) => fmt(b.tongTheTich)).join(" | ")}`);
+  }
+}
+
+console.log("\n=== 19b. Tròn chai clausii - subtilis KHÔNG có tổ hợp vừa hết -> lấy theo list cũ -> mới, dở 1 chai ===");
+{
+  // Mỗi chai subtilis pha ~1500L, clausii ~1000L/chai -> V ≈ 2000L không tổ hợp subtilis nào khớp ±3%.
+  const subtilisLots = [1, 2, 3].map((i) => ({ maLo: `S${i}`, E: 6e10, F: 10, loSanXuat: "LS" }));
+  const clausiiLots = [1, 2, 3].map((i) => ({ maLo: `C${i}`, E: 2.4e10, F: 10, loSanXuat: "LC" }));
+  const gSubtilis = 4e8, gClausii = 2.4e8, H = 5;
+  const plan = planTwoComponent({ subtilisLots, clausiiLots, product: { N: 400_000, H, gSubtilis, gClausii } });
+  check("feasible = true", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
+    const u = {}; plan.batches.forEach((b) => b.subtilis.forEach((e) => { u[e.maLo] = (u[e.maLo] || 0) + e.theTichRaw; }));
+    check("subtilis dùng S1 hết, S2 dở (đúng list cũ -> mới), không đụng S3", u.S1 === 10 && u.S2 > 0 && u.S2 < 10 && !u.S3, JSON.stringify(u));
+    const uc = {}; plan.batches.forEach((b) => b.clausii.forEach((e) => { uc[e.maLo] = (uc[e.maLo] || 0) + e.theTichRaw; }));
+    check("clausii đúng 2 chai, dùng trọn", Object.keys(uc).length === 2 && Object.values(uc).every((f) => f === 10), JSON.stringify(uc));
+  }
+}
+
+console.log("\n=== 20. planTwoComponent mode \"tronMePha\" - pha đủ lượng, chấp nhận dư 1 chai clausii ===");
+{
+  const mk = (prefix, specs) => specs.map(([F, E], i) => ({ maLo: `${prefix}.C${i + 1}`, E, F, loSanXuat: `${prefix}${Math.floor(i / 4)}` }));
+  const subtilisLots = mk("010426SF", [[10, 3.35e10], [10, 3.33e10], [9, 3.27e10], [10, 2.65e10], [10, 3.1e10], [9, 3.2e10], [8, 2.9e10], [10, 3.0e10]]);
+  const clausiiLots = mk("26G01SA", [[9, 2.91e10], [9, 3.02e10], [9, 2.60e10], [8, 2.7e10], [9, 3.1e10]]);
+  const gSubtilis = 4.0e8, gClausii = 2.4e8, H = 5.3;
+  for (const N of [150_000, 300_000, 600_000]) {
+    const plan = planTwoComponent({ subtilisLots, clausiiLots, product: { N, H, gSubtilis, gClausii }, mode: "tronMePha" });
+    check(`N=${fmt(N)}: feasible`, plan.feasible === true, plan.reason || "");
+    if (!plan.feasible) continue;
+    check(`N=${fmt(N)}: T sát N (±3%)`, Math.abs(plan.T / N - 1) <= 0.03, `T=${plan.T}`);
+    const used = (key, lots) => { const u = {}; plan.batches.forEach((b) => b[key].forEach((e) => { u[e.maLo] = (u[e.maLo] || 0) + e.theTichRaw; })); const by = Object.fromEntries(lots.map((l) => [l.maLo, l])); return Object.entries(u).filter(([m, f]) => f < by[m].F - EPStest()); };
+    check(`N=${fmt(N)}: tối đa 1 chai clausii dở`, used("clausii", clausiiLots).length <= 1);
+    check(`N=${fmt(N)}: tối đa 1 chai subtilis dở`, used("subtilis", subtilisLots).length <= 1);
+    check(`N=${fmt(N)}: mọi lần đong tròn 0.5L`, plan.batches.every((b) => [...b.subtilis, ...b.clausii].every((e) => Math.abs(e.theTichRaw / 0.5 - Math.round(e.theTichRaw / 0.5)) < 1e-9)));
+    check(`N=${fmt(N)}: không đong mẩu < 1L từ chai mới ở cuối`, !plan.batches[plan.batches.length - 1].clausii.some((e) => e.theTichRaw < 1 - EPStest() && plan.batches.filter((b) => b.clausii.some((x) => x.maLo === e.maLo)).length === 1));
+    let densOk = true;
+    plan.batches.forEach((b) => {
+      const dA = b.subtilis.reduce((s, e) => s + e.E * e.theTichRaw, 0) / b.tongTheTich;
+      const dB = b.clausii.reduce((s, e) => s + e.E * e.theTichRaw, 0) / b.tongTheTich;
+      if (dA < gSubtilis * (1 - 1e-9) || dA > gSubtilis * 1.05 || dB < gClausii * (1 - 1e-9) || dB > gClausii * 1.05) densOk = false;
+    });
+    check(`N=${fmt(N)}: mật độ mọi mẻ trong [đích, +5%]`, densOk);
+  }
+}
+
+console.log("\n=== 21. planTwoComponent \"tronMePha\" - nhặt tổ hợp chai clausii bất kỳ (không theo FIFO) khớp nhất, không dư clausii ===");
+{
+  // Cần ~1.590L: theo FIFO phải lấy CL1 (1.091L) + dở CL2 (dư ~4,9L NL); nhặt CL1 + CL3 (700L) thì
+  // vừa đủ ~1.791L... còn tốt hơn: CL3 + CL4 = 700 + 900 = 1.600L — gần như khớp, không dư chai nào.
+  const subtilisLots = [
+    { maLo: "SU1", E: 3.35e10, F: 10.0, loSanXuat: "SU1" },
+    { maLo: "SU2", E: 3.33e10, F: 10.0, loSanXuat: "SU2" },
+    { maLo: "SU3", E: 3.27e10, F: 9.0, loSanXuat: "SU3" },
+  ];
+  const clausiiLots = [
+    { maLo: "CL1", E: 2.91e10, F: 9.0, loSanXuat: "CL1" }, // 1.091,25L
+    { maLo: "CL2", E: 3.02e10, F: 9.0, loSanXuat: "CL2" }, // 1.132,5L
+    { maLo: "CL3", E: 2.4e10, F: 7.0, loSanXuat: "CL3" },  // 700L
+    { maLo: "CL4", E: 2.7e10, F: 8.0, loSanXuat: "CL4" },  // 900L
+  ];
+  const plan = planTwoComponent({ subtilisLots, clausiiLots, product: { N: 300_000, H: 5.3, gSubtilis: 4.0e8, gClausii: 2.4e8 }, mode: "tronMePha" });
+  check("feasible = true", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
+    check("chọn đúng tổ hợp CL3 + CL4 (không theo FIFO)", JSON.stringify(plan.selectedClausiiLots.slice().sort()) === JSON.stringify(["CL3", "CL4"]), JSON.stringify(plan.selectedClausiiLots));
+    const u = {}; plan.batches.forEach((b) => b.clausii.forEach((e) => { u[e.maLo] = (u[e.maLo] || 0) + e.theTichRaw; }));
+    const by = Object.fromEntries(clausiiLots.map((l) => [l.maLo, l]));
+    check("không chai clausii nào dư", Object.entries(u).every(([m, f]) => Math.abs(f - by[m].F) < EPStest()), JSON.stringify(u));
+    check("T sát N (99-101%)", plan.T >= 0.99 * 300_000 && plan.T <= 1.01 * 300_000, `T=${plan.T}`);
+  }
 }
 
 function EPStest() {
