@@ -13,14 +13,10 @@
 //     (xưởng không có chỗ lưu quá nhiều chai dở cùng lúc).
 //   - Số ống thành phẩm T ∈ [0.9N, 1.1N], ưu tiên T cao (sát 1.1N).
 //   - Mật độ pha d ∈ [G, 1.05G], không bao giờ dưới mật độ đích G.
-//   - Lô đã chọn vào nhịp phải dùng hết 100% (không để dở dang) — KHÔNG GIỚI HẠN sản lượng được
-//     phép dư ra bao nhiêu (SP 2 thành phần, xem computeFinalTargetV).
-//   - SP 2 thành phần — NGUYÊN TẮC BẤT ĐỐI XỨNG giữa 2 luồng (chốt NCV cuối ngày 2026-07-29):
-//     CLAUSII TUYỆT ĐỐI không bao giờ được để dở dang trong 1 nhịp — nếu kho subtilis không đủ để
-//     đóng nốt 1 lô clausii sắp phải mở, thuật toán DỪNG SỚM HƠN (không mở lô clausii đó), chấp
-//     nhận T thấp hơn N, KHÔNG được "dồn mật độ" để né (khác hẳn cách xử lý trần overshoot bên
-//     dưới) — báo `subtilisShortfallLot` để NCV chủ động bổ sung subtilis. SUBTILIS ngược lại ĐƯỢC
-//     PHÉP để dở dang — đây là luồng "linh hoạt" duy nhất, giới hạn vật lý duy nhất còn lại.
+//   - Lô đã chọn vào nhịp phải dùng hết 100% (không để dở dang).
+//   - SP 2 thành phần — xem 3 nguyên tắc ở đầu mục "SẢN PHẨM 2 THÀNH PHẦN" (chốt lại NCV
+//     2026-10-08): chốt cứng chai clausii nguyên vẹn trước, subtilis khớp theo (chỉ 1 chai dở),
+//     chia mẻ tối ưu toàn cục, không mẻ nào dưới 700L trừ khi không tránh được.
 //   - Chỉ chọn lô đang ở trạng thái "Chờ pha" (đã qua KQKN, đạt).
 //   - Không giới hạn cứng số lần 1 lô bị tách qua nhiều mẻ, chỉ tối thiểu hoá.
 //   - SP 2 thành phần (subtilis + clausii pha chung 1 tank): 2 mật độ đích riêng
@@ -36,30 +32,14 @@ export const TANK_MAX_L = 1080;
 // Trần cứng, KHÔNG có ngoại lệ — từng có 1 ngoại lệ "hiếm" cho phép 4 chai/mẻ khi ghép cân đối 2
 // chủng (SP 2 thành phần), nhưng NCV đã bỏ hẳn ngoại lệ đó (2026-07-30): thể tích pha giờ luôn phải
 // là bội số 0.5L (xem RAW_ROUND_STEP_L) và clausii luôn dùng hết cả chai, nên không cần tới 4 chai
-// nữa — xem findBestMatchedLots, luôn giới hạn đúng 3.
+// nữa — luôn giới hạn đúng 3.
 export const MAX_LOTS_PER_BATCH = 3;
 export const TUBE_TOL_LOW = 0.9;
 export const TUBE_TOL_HIGH = 1.1;
 export const DENSITY_TOL_HIGH = 1.05;
 
-// SP 2 thành phần: trần CỨNG cho tổng thể tích cả nhịp (kể cả phần "dọn nốt chai dở") — không bao
-// giờ vượt quá vTarget*MAX_CLOSING_OVERSHOOT. Nếu dùng hết sạch NL đã chạm tới đòi hỏi nhiều nước
-// hơn mức này, KHÔNG được phép thêm nước nữa — thay vào đó dồn thẳng phần bào tử còn lại của (các)
-// chai đang dở dang vào đúng mẻ cuối cùng MÀ KHÔNG THÊM NƯỚC, chấp nhận mật độ mẻ đó dư cao hơn
-// đích (chốt với NCV 2026-07-29: dùng hết NL — đặc biệt clausii — là ưu tiên số 1, nhưng thể tích/
-// số ống dư ra không được vượt quá 20%; mật độ được phép dư để "gánh" phần chênh lệch đó thay vì
-// thể tích). Xem packTwoStreamBatches.
-export const MAX_CLOSING_OVERSHOOT = 1.2;
 
 const EPS = 1e-6;
-
-// EPS=1e-6 hợp lý cho so sánh THỂ TÍCH (đơn vị lít, cỡ 1-1000) nhưng QUÁ NHỎ cho so sánh CFU (cỡ
-// 10^13-10^17) — sai số làm tròn dấu phẩy động tự nhiên ở quy mô CFU dễ dàng vượt 1e-6 tuyệt đối,
-// khiến code tưởng "còn dư CFU" dù chỉ là nhiễu số học (bug thật đã gặp: nới V để dùng hết đúng 1
-// lô, phần dư chỉ còn nhiễu số học cỡ CFU nhưng bị hiểu nhầm là "còn nguyên 1 lô dở dang", vô tình
-// tạo ra 1 khoản NL vô nghĩa được làm tròn lên thành 0.5L). Dùng epsilon TƯƠNG ĐỐI theo đúng quy mô
-// CFU đang so sánh cho các phép so sánh "đã dùng hết đúng 1 lô hay chưa".
-const cfuEps = (referenceCfu) => Math.max(EPS, Math.abs(referenceCfu) * 1e-9);
 
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const cfuOfLot = (lot) => lot.E * lot.F * 1000; // tổng bào tử của cả lô (CFU)
@@ -232,7 +212,7 @@ const MIN_BATCH_FRACTION = 0.8;
 
 // Sàn CỨNG tuyệt đối — không mẻ nào được dưới mức này (NCV yêu cầu rõ), trừ khi ghép cũng không
 // giải quyết được (chỉ còn đúng 1 mẻ duy nhất, hoặc ghép sẽ vượt trần tank / vượt quá 3 lô).
-export const MIN_BATCH_L = 500;
+export const MIN_BATCH_L = 700; // nâng từ 500L lên 700L (chốt NCV 2026-10-08)
 
 // Khi 1 lô bị tách ra dùng ở 2 mẻ liền nhau, nếu phần CÒN LẠI (chuyển sang mẻ sau) từ mức này
 // (đơn vị lít NL thô) TRỞ XUỐNG thì coi là "mẩu vụn" khó đong thực tế — thà dùng LUÔN TRỌN VẸN
@@ -495,670 +475,479 @@ export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxL
 // ---------------------------------------------------------------------------
 // SẢN PHẨM 2 THÀNH PHẦN (subtilis + clausii pha chung 1 tank)
 // ---------------------------------------------------------------------------
+//
+// Viết lại 2026-10-08 theo đúng 3 nguyên tắc NCV chốt (thay toàn bộ cách "tham lam từng mẻ" cũ —
+// cách cũ tự quyết từng mẻ một rồi mới tính mẻ sau, nên hay để lẻ 1 ít clausii cuối cùng thành 1 mẻ
+// tí hon ~100L, hoặc phải "dồn nốt" khiến mẻ cuối dư mật độ gấp nhiều lần đích):
+//   1. CHỐT CỨNG các chai clausii dùng tới NGAY TỪ ĐẦU: theo đúng thứ tự FIFO, chọn số chai NGUYÊN
+//      VẸN cho tổng thể tích pha GẦN mục tiêu N nhất. Clausii không bao giờ dư/dở — chai nào đã
+//      chọn thì dùng hết 100%, chai không chọn thì không đụng tới.
+//   2. Tính lượng subtilis khớp ĐÚNG với tổng clausii đó (cùng thể tích pha, đúng mật độ đích) — được
+//      phép đảo thứ tự chai subtilis cho hợp lý, nhưng chỉ ĐÚNG 1 chai subtilis được dùng dở.
+//   3. Chia toàn bộ thể tích thành các mẻ bằng quy hoạch động (xét MỌI cách cắt cùng lúc, không chốt
+//      từng mẻ một): mẻ ≤ trần tank, ≤ 3 chai/mẻ (gộp 2 chủng), KHÔNG mẻ nào dưới 700L — chỉ chấp
+//      nhận mẻ 500-700L khi không còn cách cắt nào khác tránh được, tuyệt đối không mẻ dưới 500L.
+//      Việc đong tròn NL 0.5L được tính NGAY TRONG bước chia mẻ (không làm sau như bản cũ — làm sau
+//      thì kích cỡ mẻ bị xê dịch, mẻ vừa đủ 700L có thể tụt xuống dưới, và sinh mẩu đong 0.5L lẻ).
 
-/**
- * V tối đa lấy LIÊN TỤC được từ 1 luồng bắt đầu đúng vị trí cursor hiện tại, KHÔNG xáo trộn
- * cursor (chỉ xem trước). Dừng khi hết sạch luồng, hoặc (nếu enforceLoSanXuat) khi chạm sang
- * lô sản xuất khác với lô đang dở — để quyết định V an toàn cho 1 mẻ mà không phải "rút thử
- * rồi mới biết thiếu/thừa" như cách cũ (nguyên nhân gây lệch mật độ nặng trước đây).
- * Hết sạch luồng -> trả về 0 (không phải vô hạn): SP 2 thành phần LUÔN cần cả 2 luồng trong
- * mỗi mẻ, nên 1 luồng cạn kho nghĩa là KHÔNG thể tạo thêm mẻ nào nữa, không phải "hết ràng buộc".
- */
-function maxAvailableV(orderedLots, cursor, d, enforceLoSanXuat) {
-  if (cursor.idx >= orderedLots.length) return 0;
-  const boundaryLoSanXuat = loSanXuatOf(orderedLots[cursor.idx]);
-  let idx = cursor.idx;
-  let cfu = 0;
-  while (idx < orderedLots.length) {
-    const lot = orderedLots[idx];
-    if (enforceLoSanXuat && loSanXuatOf(lot) !== boundaryLoSanXuat) break;
-    cfu += cfuOfLot(lot) - (idx === cursor.idx ? cursor.usedCFU : 0);
-    idx++;
+// Sàn cứng tuyệt đối cho 1 mẻ SP 2 thành phần — mẻ 500-700L chỉ chấp nhận khi không còn cách nào
+// khác (xem MIN_BATCH_L), dưới mức này thì không bao giờ (trừ khi cả nhịp chỉ có chừng đó thể tích).
+const MIN_BATCH_HARD_L = 500;
+
+// Bước lưới (L thể tích pha) để thử các điểm cắt mẻ ngoài các ranh giới chai — đủ mịn so với khoảng
+// 700-1080L của 1 mẻ, vẫn nhẹ để quy hoạch động chạy tức thì trên trình duyệt.
+const CUT_GRID_L = 10;
+
+// Trọng số hàm chi phí khi chia mẻ — các bậc cách nhau rất xa để thành ưu tiên tuyệt đối theo thứ tự:
+// (1) không mẻ < 500L/vượt tank/thiếu 1 chủng, (2) không mẻ quá 3 chai, (3) mật độ không dư quá 5%,
+// (4) không mẻ < 700L, (5) không để mẩu NL vụn < 1L, (6) ít mẻ nhất (mẻ càng to càng tốt), (7) mật
+// độ càng sát đích càng tốt, (8) cuối cùng mới tới cân đối kích cỡ giữa các mẻ.
+const COST_INVALID = 1e8;
+const COST_BELOW_HARD_MIN = 1e7;
+const COST_PER_EXTRA_LOT = 1e6;
+const COST_DENSITY_OVER_TOL = 1e5;
+const COST_BELOW_MIN = 1e4;
+const COST_FRAGMENT = 1e3;
+const COST_PER_BATCH = 200;
+const COST_PER_DENSITY_PCT = 10;
+const COST_PER_SPLIT = 3;
+
+const lotVolumeAt = (lot, g) => (lot.E * lot.F) / g; // thể tích pha ra từ CẢ chai, ở đúng mật độ đích g
+const roundToStep = (x) => Math.round(x / RAW_ROUND_STEP_L) * RAW_ROUND_STEP_L;
+const ceilToStep = (x) => Math.ceil(x / RAW_ROUND_STEP_L - 1e-9) * RAW_ROUND_STEP_L;
+const floorToStep = (x) => Math.floor(x / RAW_ROUND_STEP_L + 1e-9) * RAW_ROUND_STEP_L;
+
+/** Trải các chai (đã theo thứ tự dùng) lên trục thể tích pha: chai i chiếm đoạn [start, end) có độ
+ * dài = thể tích pha ra từ cả chai ở mật độ đích. vLimit cắt chai cuối (chai dùng dở, nếu có).
+ * k = lít NL thô ứng với 1 lít thể tích pha (= g/E). */
+function layoutLots(orderedLots, g, vLimit = Infinity) {
+  const segs = [];
+  let pos = 0;
+  for (const lot of orderedLots) {
+    if (pos >= vLimit - EPS) break;
+    const len = lotVolumeAt(lot, g);
+    segs.push({ lot, start: pos, end: Math.min(pos + len, vLimit), k: g / lot.E });
+    pos += len;
   }
-  return cfu / (1000 * d);
+  return segs;
 }
 
-/** Thể tích (V) nếu lấy ĐÚNG N lô tiếp theo từ cursor (kể cả phần dở dang của lô đang mở, nếu có,
- * tính là 1 trong N lô đó) — KHÔNG bị chặn bởi ranh giới lô sản xuất (dùng cho việc tìm tổ hợp cân
- * đối bên dưới, nơi CHO PHÉP băng qua lô sản xuất nếu cần, khác với maxAvailableV mặc định). Trả
- * về 0 nếu không đủ N lô còn lại trong kho.
- */
-function vForNextNLots(orderedLots, cursor, d, n) {
-  let idx = cursor.idx;
-  let cfu = 0;
-  let count = 0;
-  if (cursor.usedCFU > EPS && idx < orderedLots.length) {
-    cfu += cfuOfLot(orderedLots[idx]) - cursor.usedCFU;
-    idx++;
-    count++;
+/** Vị trí ĐÃ ĐONG TRÒN của 1 luồng tại điểm cắt x trên trục thể tích: chai thứ i, đã rút r lít NL thô
+ * từ chai đó (bội số 0.5L). Điểm cắt bên trong chai làm tròn GẦN NHẤT — mỗi điểm cắt tự làm tròn độc
+ * lập theo đúng vị trí của nó nên sai số KHÔNG cộng dồn qua các mẻ. Điểm cuối nhịp (isEnd) làm tròn
+ * lên/xuống theo endRound — chọn sẵn bởi chooseEndRounding sao cho tổng sản lượng sát mục tiêu nhất. */
+function roundedPosition(segs, x, isEnd, endRound = ceilToStep) {
+  let lo = 0, hi = segs.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (segs[mid].end <= x + EPS) lo = mid + 1; else hi = mid; }
+  if (lo >= segs.length) {
+    // Qua hết các chai — nếu chai cuối là chai dùng dở (bị cắt ở cuối nhịp) thì làm tròn LÊN.
+    const last = segs[segs.length - 1];
+    const isPartial = last && last.end - last.start < last.lot.F / last.k - EPS;
+    if (isEnd && isPartial) return { i: segs.length - 1, r: Math.min(last.lot.F, endRound((x - last.start) * last.k)) };
+    return { i: segs.length, r: 0 };
   }
-  while (count < n && idx < orderedLots.length) {
-    cfu += cfuOfLot(orderedLots[idx]);
-    idx++;
-    count++;
-  }
-  if (count < n) return 0; // không đủ N lô còn lại.
-  return cfu / (1000 * d);
+  const s = segs[lo];
+  const r = Math.min(s.lot.F, Math.max(0, roundToStep((x - s.start) * s.k)));
+  return { i: lo, r };
 }
 
-/**
- * NHÌN TRƯỚC nhiều tổ hợp "lấy bao nhiêu lô từ mỗi bên" (subtilis, clausii) bắt đầu từ đúng vị trí
- * cursor hiện tại của cả 2 luồng — thay vì chỉ lấy tới hết ranh giới lô sản xuất hiện tại (cách cũ,
- * kiểu FIFO thuần, dễ ghép ra mẻ lệch mật độ nặng khi kích cỡ/mật độ 2 chủng không khớp nhau — xem
- * feedback-mixplanner-design-choices). CHỌN tổ hợp có tỉ lệ vA/vB GẦN 1 NHẤT (cân đối nhất) trong
- * giới hạn cứng `maxLotsPerBatch` (3 chai, KHÔNG có ngoại lệ — NCV đã bỏ hẳn ngoại lệ 4 chai
- * 2026-07-30). Trả về {vA, vB, nA, nB} của tổ hợp tốt nhất, hoặc null nếu 1 trong 2 bên không còn
- * lô nào.
- */
-function findBestMatchedLots(orderedA, curA, gSubtilis, orderedB, curB, gClausii, maxLotsPerBatch) {
-  if (curA.idx >= orderedA.length || curB.idx >= orderedB.length) return null;
+/** Phần NL thô từng chai trong 1 mẻ giữa 2 vị trí đã đong tròn a -> b của cùng 1 luồng. */
+function portionsBetween(segs, a, b) {
+  const out = [];
+  for (let i = a.i; i <= Math.min(b.i, segs.length - 1); i++) {
+    const F = segs[i].lot.F;
+    const from = i === a.i ? a.r : 0;
+    const to = i === b.i ? b.r : F;
+    const raw = to - from;
+    if (raw > EPS) out.push({ seg: segs[i], raw, split: raw < F - EPS });
+  }
+  return out;
+}
+
+/** Quy hoạch động chia [0, V] thành các mẻ với tổng chi phí nhỏ nhất (xem trọng số COST_*). Điểm cắt
+ * ứng viên: ranh giới mọi chai 2 chủng + từng bước 0.5L NL thô bên trong chai clausii + lưới đều
+ * CUT_GRID_L. Mỗi mẻ được đánh giá theo ĐÚNG lượng NL đã đong tròn và thể tích pha thật (giới hạn
+ * bởi luồng ít bào tử hơn, nên mật độ không bao giờ dưới đích). Trả về { batches, cost }. */
+function segmentBatches(segsA, segsB, V, tankMaxL, maxLotsPerBatch, gSubtilis, gClausii, endRoundA = ceilToStep, endRoundB = ceilToStep) {
+  const raw = [0, V];
+  segsA.forEach((s) => raw.push(s.end));
+  segsB.forEach((s) => {
+    raw.push(s.end);
+    const step = RAW_ROUND_STEP_L / s.k;
+    for (let t = s.start + step; t < s.end - EPS; t += step) raw.push(t);
+  });
+  for (let t = CUT_GRID_L; t < V; t += CUT_GRID_L) raw.push(t);
+  raw.sort((a, b) => a - b);
+  const xs = [];
+  raw.forEach((x) => { if (x > EPS && x < V - 1e-4 && x - (xs.length ? xs[xs.length - 1] : 0) > 1e-4) xs.push(x); });
+  xs.unshift(0);
+  xs.push(V);
+  const n = xs.length;
+  const posA = xs.map((x, idx) => roundedPosition(segsA, x, idx === n - 1, endRoundA));
+  const posB = xs.map((x, idx) => roundedPosition(segsB, x, idx === n - 1, endRoundB));
+
+  // Quét 1 luồng giữa 2 vị trí đã đong tròn KHÔNG cấp phát mảng (DP gọi hàng trăm nghìn lần): tổng
+  // CFU, số chai góp mặt và phạt chai bị chia (COST_PER_SPLIT, mẩu vụn < 1L thêm COST_FRAGMENT).
+  const scan = (segs, a, b) => {
+    let cfu = 0, cnt = 0, pen = 0;
+    for (let i = a.i, last = Math.min(b.i, segs.length - 1); i <= last; i++) {
+      const lot = segs[i].lot;
+      const raw = (i === b.i ? b.r : lot.F) - (i === a.i ? a.r : 0);
+      if (raw <= EPS) continue;
+      cfu += lot.E * raw * 1000;
+      cnt++;
+      if (raw < lot.F - EPS) pen += raw < MIN_LOT_FRAGMENT_L - EPS ? COST_PER_SPLIT + COST_FRAGMENT : COST_PER_SPLIT;
+    }
+    return { cfu, cnt, pen };
+  };
+  const evalCost = (i, j) => {
+    const sa = scan(segsA, posA[i], posA[j]);
+    if (!sa.cnt) return null; // SP 2 thành phần: mẻ nào cũng phải đủ 2 chủng
+    const sb = scan(segsB, posB[i], posB[j]);
+    if (!sb.cnt) return null;
+    const vA = sa.cfu / (1000 * gSubtilis);
+    const vB = sb.cfu / (1000 * gClausii);
+    const size = Math.min(vA, vB);
+    const over = Math.max(vA, vB) / size - 1; // luồng còn lại dư mật độ bấy nhiêu do đong tròn 0.5L
+    let c = COST_PER_BATCH + 0.002 * (size - SOFT_TARGET_L) ** 2 + COST_PER_DENSITY_PCT * over * 100 + sa.pen + sb.pen;
+    if (size > tankMaxL + EPS) c += COST_INVALID;
+    if (size < MIN_BATCH_HARD_L - EPS) c += COST_BELOW_HARD_MIN;
+    else if (size < MIN_BATCH_L - EPS) c += COST_BELOW_MIN;
+    if (size > SOFT_OVERFLOW_L) c += (size - SOFT_OVERFLOW_L) * 2;
+    if (over > DENSITY_TOL_HIGH - 1 + EPS) c += COST_DENSITY_OVER_TOL;
+    const lots = sa.cnt + sb.cnt;
+    if (lots > maxLotsPerBatch) c += COST_PER_EXTRA_LOT * (lots - maxLotsPerBatch);
+    return { c, size };
+  };
+
+  const dp = new Array(n).fill(Infinity);
+  const prev = new Array(n).fill(-1);
+  dp[0] = 0;
+  const windowL = tankMaxL * DENSITY_TOL_HIGH + 1; // khoảng cắt rộng nhất có thể còn vừa tank sau đong tròn
+  // Mẻ hẹp hơn ~450L chắc chắn < 500L kể cả sau đong tròn -> bỏ qua luôn (chỉ khi tổng đủ chia mẻ ≥ 500L).
+  const minSpan = V >= 2 * MIN_BATCH_HARD_L ? 0.9 * MIN_BATCH_HARD_L : 0;
+  let windowStart = 0;
+  for (let j = 1; j < n; j++) {
+    while (xs[j] - xs[windowStart] > windowL) windowStart++;
+    for (let i = windowStart; i < j && xs[j] - xs[i] >= minSpan; i++) {
+      if (dp[i] === Infinity) continue;
+      const e = evalCost(i, j);
+      if (!e) continue;
+      const c = dp[i] + e.c;
+      if (c < dp[j]) { dp[j] = c; prev[j] = i; }
+    }
+  }
+  if (dp[n - 1] === Infinity) return { batches: null, cost: Infinity };
+  const batches = [];
+  for (let j = n - 1; j > 0; j = prev[j]) {
+    const i = prev[j];
+    const toEntries = (ps) => ps.map((p) => ({ maLo: p.seg.lot.maLo, E: p.seg.lot.E, theTichRaw: p.raw, loSanXuat: p.seg.lot.loSanXuat }));
+    batches.push({ tongTheTich: evalCost(i, j).size, subtilis: toEntries(portionsBetween(segsA, posA[i], posA[j])), clausii: toEntries(portionsBetween(segsB, posB[i], posB[j])) });
+  }
+  batches.reverse();
+  return { batches, cost: dp[n - 1] };
+}
+
+/** Lần đong CUỐI của chai dùng dở ở cuối nhịp (mỗi chủng nếu có) làm tròn LÊN hay XUỐNG 0.5L — thử cả
+ * 4 tổ hợp, chọn tổ hợp cho tổng thể tích pha (giới hạn bởi chủng ít bào tử hơn) sát vTarget nhất:
+ * hụt tính gấp đôi dư (ưu tiên pha đủ). Chai dùng hết nguyên vẹn thì không có gì để chọn. */
+function chooseEndRounding(segsA, segsB, vTarget, gSubtilis, gClausii) {
+  const options = (segs, g) => {
+    const last = segs[segs.length - 1];
+    const before = segs.slice(0, -1).reduce((sum, x) => sum + lotVolumeAt(x.lot, g), 0);
+    const isPartial = last.end - last.start < last.lot.F / last.k - EPS;
+    if (!isPartial) return [{ fn: ceilToStep, tot: before + lotVolumeAt(last.lot, g) }];
+    const raw = (last.end - last.start) * last.k;
+    return [ceilToStep, floorToStep].map((fn) => ({ fn, tot: before + (last.lot.E * Math.min(last.lot.F, fn(raw))) / g }));
+  };
   let best = null;
-  for (let nA = 1; nA <= maxLotsPerBatch - 1; nA++) {
-    const vA = vForNextNLots(orderedA, curA, gSubtilis, nA);
-    if (vA <= EPS) break; // không đủ nA lô bên subtilis -> nA lớn hơn cũng vô nghĩa.
-    for (let nB = 1; nA + nB <= maxLotsPerBatch; nB++) {
-      const vB = vForNextNLots(orderedB, curB, gClausii, nB);
-      if (vB <= EPS) break; // không đủ nB lô bên clausii.
-      const ratio = Math.min(vA, vB) / Math.max(vA, vB);
-      const candidate = { vA, vB, nA, nB, ratio, withinNormalLimit: true };
-      if (!best || candidate.ratio > best.ratio) best = candidate;
+  for (const a of options(segsA, gSubtilis)) {
+    for (const b of options(segsB, gClausii)) {
+      const v = Math.min(a.tot, b.tot);
+      const score = v >= vTarget - EPS ? v - vTarget : 2 * (vTarget - v);
+      if (!best || score < best.score - EPS) best = { score, a: a.fn, b: b.fn };
     }
   }
   return best;
 }
 
-/** Đếm số lô (không trùng) sẽ bị chạm tới nếu rút đúng cfuBudget từ cursor — chỉ xem trước. */
-function peekTouchedLotCount(orderedLots, cursor, cfuBudget) {
-  let idx = cursor.idx;
-  let used = cursor.usedCFU;
-  let remaining = cfuBudget;
-  let count = 0;
-  const budgetEps = cfuEps(cfuBudget);
-  while (remaining > budgetEps && idx < orderedLots.length) {
-    const lotCFU = cfuOfLot(orderedLots[idx]);
-    const lotEps = cfuEps(lotCFU);
-    const take = Math.min(lotCFU - used, remaining);
-    if (take > lotEps) count++;
-    remaining -= take;
-    used += take;
-    if (used >= lotCFU - lotEps) { idx++; used = 0; }
+/** Các thứ tự dùng chai subtilis đem thử — FIFO trước tiên, rồi các biến thể "đảo chai" (NCV cho
+ * phép): đưa 1 chai xuống làm chai dùng dở cuối cùng, hoặc hoán đổi 2 chai liền nhau — để ranh giới
+ * chai subtilis khớp ranh giới chai clausii hơn, bớt số chai/mẻ và bớt mẻ lẻ. Chỉ xét quanh nhóm chai
+ * FIFO thật sự cần dùng (thêm 2 chai dự phòng), không xáo trộn cả kho. */
+function subtilisOrderCandidates(orderedA, gSubtilis, V) {
+  let cum = 0, m = 0;
+  while (m < orderedA.length && cum < V - EPS) { cum += lotVolumeAt(orderedA[m], gSubtilis); m++; }
+  const pool = Math.min(orderedA.length, m + 2);
+  const cands = [orderedA];
+  for (let i = 0; i < pool; i++) {
+    const rest = orderedA.filter((_, j) => j !== i);
+    const at = Math.max(0, m - 1);
+    cands.push([...rest.slice(0, at), orderedA[i], ...rest.slice(at)]);
   }
-  return count;
+  for (let i = 0; i + 1 < pool; i++) {
+    const o = [...orderedA];
+    [o[i], o[i + 1]] = [o[i + 1], o[i]];
+    cands.push(o);
+  }
+  return cands;
 }
 
-/** Xem trước (không mutate): nếu rút đúng V (đổi ra cfuBudget = d*1000*V) từ cursor, lô CUỐI CÙNG
- * bị chạm tới còn lại (chưa dùng hết) bao nhiêu — dùng để phát hiện "mẩu vụn" sắp bị bỏ lại cho mẻ
- * sau (xem MIN_LOT_FRAGMENT_L). Trả về CẢ 2 đơn vị vì khác mục đích:
- *  - rawF: lít NL THÔ còn dư của đúng lô đó (dùng để SO SÁNH với MIN_LOT_FRAGMENT_L — đây mới là
- *    con số "khó đong" mà NCV quan tâm, KHÔNG PHẢI thể tích pha loãng).
- *  - bumpV: thể tích mẻ (V) cần CỘNG THÊM để rút hết đúng phần rawF đó ở mật độ d — dùng để biết
- *    nới V thêm bao nhiêu (số này có thể LỚN hơn rawF nhiều lần nếu lô rất đậm đặc so với mật độ
- *    đích — ban đầu code nhầm dùng số này để so sánh ngưỡng, khiến ngưỡng gần như không bao giờ
- *    kích hoạt được ở SP 2 thành phần, đã sửa 2026-07-29).
- * Trả về {rawF:0, bumpV:0} nếu vừa khít đúng ranh giới 1 lô, hoặc đã hết sạch kho.
- */
-function peekLeftoverInBoundaryLot(orderedLots, cursor, d, V) {
-  let idx = cursor.idx;
-  let used = cursor.usedCFU;
-  let remaining = d * 1000 * V;
-  const budgetEps = cfuEps(remaining);
-  while (remaining > budgetEps && idx < orderedLots.length) {
-    const lotCFU = cfuOfLot(orderedLots[idx]);
-    const lotEps = cfuEps(lotCFU);
-    const take = Math.min(lotCFU - used, remaining);
-    remaining -= take;
-    used += take;
-    if (used >= lotCFU - lotEps) { idx++; used = 0; } else break;
-  }
-  if (idx >= orderedLots.length) return { rawF: 0, bumpV: 0 };
-  const lot = orderedLots[idx];
-  const lotCFU = cfuOfLot(lot);
-  if (used <= cfuEps(lotCFU)) return { rawF: 0, bumpV: 0 };
-  const leftoverCFU = lotCFU - used;
-  return { rawF: leftoverCFU / (1000 * lot.E), bumpV: leftoverCFU / (1000 * d) };
+/** Quy hoạch động 0/1 "nhặt tổ hợp chai bất kỳ" trên thể tích pha làm tròn 1L: với mỗi tổng s ≤ maxSum,
+ * số chai ít nhất đạt đúng s; pick(s) trả lại đúng tổ hợp đó. Dùng chung cho mọi bước chọn chai. */
+function subsetSums(lots, vol, maxSum) {
+  const sizes = lots.map((l) => Math.max(1, Math.round(vol(l))));
+  const INF = 1e9;
+  let cnt = new Int32Array(maxSum + 1).fill(INF);
+  cnt[0] = 0;
+  const take = lots.map((_, i) => {
+    const sz = sizes[i];
+    const next = cnt.slice();
+    const t = new Uint8Array(maxSum + 1);
+    for (let sum = sz; sum <= maxSum; sum++) {
+      if (cnt[sum - sz] + 1 < next[sum]) { next[sum] = cnt[sum - sz] + 1; t[sum] = 1; }
+    }
+    cnt = next;
+    return t;
+  });
+  const pick = (sum) => {
+    const out = [];
+    for (let i = lots.length - 1; i >= 0 && sum > 0; i--) if (take[i][sum]) { out.push(lots[i]); sum -= sizes[i]; }
+    return out;
+  };
+  return { reachable: (sum) => sum >= 0 && sum <= maxSum && cnt[sum] < INF, count: (sum) => cnt[sum], pick };
 }
 
-/** Xem trước (không mutate): chiều NGƯỢC LẠI với peekLeftoverInBoundaryLot — kể từ khi tìm tổ hợp
- * cân đối (`findBestMatchedLots`) được phép nới V băng qua ranh giới lô sản xuất, V có thể vừa mới
- * "gặm" 1 miếng XÍU (rawF ≤ MIN_LOT_FRAGMENT_L) của 1 lô HOÀN TOÀN MỚI (chưa hề chạm tới trước khi
- * vào mẻ này) rồi bị mốc mềm/trần tank/giới hạn số lô chặn lại giữa chừng — để lại phần LỚN của
- * đúng lô đó cho mẻ SAU (ca thực tế gặp: mẩu 0.5L/9.5L). CHỈ tính là "gặm mới" khi lô biên sau khi
- * mô phỏng V khác hẳn lô mà cursor đang đứng LÚC VÀO mẻ này (idx đã nhích qua) — nếu cursor đã đang
- * dở dang sẵn 1 lô từ trước (không phải mới trong mẻ này), KHÔNG tính là gặm mới. Trả về CẢ 2 đơn
- * vị như hàm trên: rawF để so ngưỡng, shrinkV = đúng lượng cần LÙI V lại để lô đó chưa bị chạm tới.
- */
-function peekNewLotNibble(orderedLots, cursor, d, V) {
-  const entryIdx = cursor.idx;
-  let idx = cursor.idx;
-  let used = cursor.usedCFU;
-  let remaining = d * 1000 * V;
-  const budgetEps = cfuEps(remaining);
-  while (remaining > budgetEps && idx < orderedLots.length) {
-    const lotCFU = cfuOfLot(orderedLots[idx]);
-    const lotEps = cfuEps(lotCFU);
-    const take = Math.min(lotCFU - used, remaining);
-    remaining -= take;
-    used += take;
-    if (used >= lotCFU - lotEps) { idx++; used = 0; } else break;
-  }
-  if (idx >= orderedLots.length || idx === entryIdx || used <= EPS) return { rawF: 0, shrinkV: 0 };
-  const lot = orderedLots[idx];
-  return { rawF: used / (1000 * lot.E), shrinkV: used / (1000 * d) };
+/** Chai clausii loại chính (priority 0) luôn ưu tiên: chỉ đụng loại dự phòng khi loại chính không đủ
+ * (khi đó dùng HẾT loại chính — `fixed` — rồi nhặt thêm từ loại dự phòng cho phần còn thiếu). */
+function splitByPriority(orderedB, vol, vTarget) {
+  const primary = orderedB.filter((l) => (l.priority ?? 0) === 0);
+  const backup = orderedB.filter((l) => (l.priority ?? 0) !== 0);
+  const capPrimary = primary.reduce((sum, l) => sum + vol(l), 0);
+  if (capPrimary < 0.99 * vTarget && backup.length) return { fixed: primary, pool: backup, target: vTarget - capPrimary };
+  return { fixed: [], pool: primary, target: vTarget };
 }
 
-/** Thể tích còn cần rút để dùng HẾT đúng chai đang dở dang (đã chạm, usedCFU>0) tại cursor.
- * Cursor đang sạch (usedCFU=0, chưa chạm chai nào, còn chai để mở) -> Infinity: chai hiện tại
- * không ép V nào cả. Cursor đã cạn sạch TOÀN BỘ kho (idx hết) -> null: không còn gì để rút thêm,
- * phân biệt rõ với "Infinity" (không giới hạn nhưng vẫn còn hàng) để computeFinalTargetV biết khi
- * nào phải dừng hẳn vì hết nguyên liệu thật sự, không phải vì luồng đang sạch.
- */
-function finishCurrentBottleV(orderedLots, cursor, d) {
-  if (cursor.idx >= orderedLots.length) return null;
-  const lotCFU = cfuOfLot(orderedLots[cursor.idx]);
-  if (cursor.usedCFU <= cfuEps(lotCFU)) return Infinity;
-  const remainingCFU = lotCFU - cursor.usedCFU;
-  return remainingCFU / (1000 * d);
+/** Chế độ "tròn mẻ pha": chọn TỔ HỢP chai clausii bất kỳ (không cần theo FIFO) có tổng thể tích pha
+ * khớp nhất với vTarget — dư (tổng > cần, phần dư nằm lại ở 1 chai dùng dở) tính 1 phần, hụt (tổng <
+ * cần, pha thiếu chút ít nhưng không dư chai nào) tính gấp đôi và chỉ chấp nhận hụt tối đa 1%; hoà
+ * thì ít chai hơn. Trả về danh sách chai theo FIFO. */
+function chooseClausiiSubset(orderedB, gClausii, vTarget) {
+  const vol = (l) => lotVolumeAt(l, gClausii);
+  const { fixed, pool, target } = splitByPriority(orderedB, vol, vTarget);
+  if (!pool.length || target <= EPS) return [...fixed].sort(fifoCompare);
+  const T = Math.round(target);
+  const maxSum = T + Math.max(...pool.map((l) => Math.round(vol(l))));
+  const dpRes = subsetSums(pool, vol, maxSum);
+  let bestSum = -1, bestScore = Infinity;
+  for (let sum = Math.ceil(0.99 * T); sum <= maxSum; sum++) {
+    if (!dpRes.reachable(sum)) continue;
+    const score = (sum >= T ? sum - T : 2 * (T - sum)) + dpRes.count(sum) * 1e-3;
+    if (score < bestScore) { bestScore = score; bestSum = sum; }
+  }
+  if (bestSum < 0) return [...orderedB].sort(fifoCompare); // kho không đủ — dùng hết, để bước sau báo thiếu
+  return [...fixed, ...dpRes.pick(bestSum)].sort(fifoCompare);
 }
 
-/** Rút ĐÚNG cfuBudget từ cursor (mutating), trả về danh sách lô đã chạm + F thực tế mỗi lô. */
-function consumeExactCFU(orderedLots, cursor, cfuBudget) {
-  const taken = [];
-  let remaining = cfuBudget;
-  const budgetEps = cfuEps(cfuBudget);
-  while (remaining > budgetEps && cursor.idx < orderedLots.length) {
-    const lot = orderedLots[cursor.idx];
-    const lotCFU = cfuOfLot(lot);
-    const lotEps = cfuEps(lotCFU);
-    const take = Math.min(lotCFU - cursor.usedCFU, remaining);
-    if (take > lotEps) taken.push({ maLo: lot.maLo, E: lot.E, F: take / (lot.E * 1000) });
-    cursor.usedCFU += take;
-    remaining -= take;
-    if (cursor.usedCFU >= lotCFU - lotEps) { cursor.idx += 1; cursor.usedCFU = 0; }
+/** Chế độ "tròn chai clausii": các phương án tổ hợp chai clausii NGUYÊN VẸN bất kỳ (chốt NCV
+ * 2026-10-08, không cần theo FIFO), xếp theo mức khớp với vTarget — dư tính 1 phần, hụt tính gấp
+ * đôi (NCV: "ưu tiên lấy hơn"), hoà thì ít chai hơn — không vượt quá khả năng kho subtilis (vCeiling).
+ * Trả về tối đa maxCands phương án { lots (theo FIFO), V, score }, tốt nhất trước. */
+function wholeClausiiCandidates(orderedB, gClausii, vTarget, vCeiling, maxCands = 12) {
+  const vol = (l) => lotVolumeAt(l, gClausii);
+  const { fixed, pool, target } = splitByPriority(orderedB, vol, vTarget);
+  const fixedV = fixed.reduce((sum, l) => sum + vol(l), 0);
+  if (fixedV > vCeiling + EPS) return [];
+  const T = Math.round(target);
+  const maxSize = pool.length ? Math.max(...pool.map((l) => Math.round(vol(l)))) : 0;
+  const maxSum = Math.max(0, Math.min(Math.floor(vCeiling - fixedV), 2 * T + maxSize));
+  const dpRes = subsetSums(pool, vol, maxSum);
+  const cands = [];
+  for (let sum = fixed.length ? 0 : 1; sum <= maxSum; sum++) {
+    if (!dpRes.reachable(sum)) continue;
+    cands.push({ sum, score: (sum >= T ? sum - T : 2 * (T - sum)) + dpRes.count(sum) * 1e-3 });
   }
-  return taken;
+  cands.sort((a, b) => a.score - b.score);
+  return cands.slice(0, maxCands).map(({ sum, score }) => {
+    const lots = [...fixed, ...dpRes.pick(sum)].sort(fifoCompare);
+    return { lots, V: lots.reduce((acc, l) => acc + vol(l), 0), score };
+  });
+}
+
+// Dung sai để coi 1 tổ hợp chai subtilis NGUYÊN VẸN là "pha vừa hết" với lượng clausii đã chốt — lệch
+// trong khoảng này thì chủng dư hơn chỉ pha mật độ nhỉnh lên tương ứng (≤ 3%), không chai nào dở.
+const SUBTILIS_MATCH_TOL = 0.03;
+
+/** Tìm tổ hợp chai subtilis NGUYÊN VẸN bất kỳ có tổng thể tích pha khớp V trong ±SUBTILIS_MATCH_TOL
+ * (thừa subtilis tính 1 phần, thiếu tính 1.5 phần — thiếu thì sản lượng phải co theo; hoà thì ít chai
+ * hơn). Không có tổ hợp nào khớp -> null (nơi gọi dùng subtilis theo FIFO, dở đúng 1 chai). */
+function matchSubtilisSubset(orderedA, gSubtilis, V) {
+  const vol = (l) => lotVolumeAt(l, gSubtilis);
+  const lo = Math.ceil(V * (1 - SUBTILIS_MATCH_TOL));
+  const hi = Math.floor(V * (1 + SUBTILIS_MATCH_TOL));
+  if (hi < 1 || !orderedA.length) return null;
+  const dpRes = subsetSums(orderedA, vol, hi);
+  let bestSum = -1, bestScore = Infinity;
+  for (let sum = Math.max(1, lo); sum <= hi; sum++) {
+    if (!dpRes.reachable(sum)) continue;
+    const score = (sum >= V ? sum - V : 1.5 * (V - sum)) + dpRes.count(sum) * 1e-3;
+    if (score < bestScore) { bestScore = score; bestSum = sum; }
+  }
+  return bestSum < 0 ? null : dpRes.pick(bestSum).sort(fifoCompare);
 }
 
 /**
- * Tính TRƯỚC (mô phỏng trên cursor riêng, không đụng tới cursor thật) thể tích vFinal >= vTarget
- * cần pha để CLAUSII quay về sạch (đóng nốt đúng chai đang dở tại vTarget, nếu có) — CHỈ clausii,
- * KHÔNG còn đuổi theo cho subtilis sạch nữa (bản cũ coi CẢ 2 luồng bắt buộc dùng hết nên phải lặp
- * nhiều bước đuổi theo nhau; nay chỉ clausii bị ràng buộc "không bao giờ dở dang" — chốt NCV — nên
- * đúng 1 bước là đủ: đóng nốt chai clausii đang dở, không mở thêm lô clausii nào khác). SUBTILIS
- * được PHÉP để dở dang, nên không cần tính gì thêm cho nó ở đây — nó tự nhận đúng lượng cần thiết
- * để khớp V này khi packTwoStreamBatches rút CFU thật.
+ * Lập kế hoạch mẻ pha cho sản phẩm 2 thành phần — xem 3 nguyên tắc ở đầu mục này.
+ * Mật độ mọi mẻ luôn ≥ đích cho cả 2 chủng (chỉ có thể nhỉnh vài % do đong tròn NL 0.5L), không còn
+ * bất kỳ cơ chế "dồn nốt chai dở không thêm nước" nào. T có thể lệch khỏi N tuỳ cỡ chai clausii (chọn
+ * số chai nguyên vẹn gần N nhất) — UI cảnh báo khi T < 90% hoặc > 105% N để NCV tự quyết.
  *
- * Hàm này CỐ TÌNH KHÔNG áp trần sản lượng lẫn không kiểm tra kho subtilis có đủ hay không — cả 2
- * việc đó là của NGƯỜI GỌI (packTwoStreamBatches): trần MAX_CLOSING_OVERSHOOT áp như cũ (dồn mật độ
- * khi vướng trần — chốt cũ, giữ nguyên); còn nếu kho subtilis KHÔNG đủ để with tới đúng vFinal này,
- * người gọi phải LÙI vFinal về đúng ranh giới lô clausii sạch gần nhất còn nằm trong khả năng thật
- * của subtilis (xem largestCleanCheckpointAtMost) — tuyệt đối không dồn mật độ để né trường hợp đó.
- * (Nếu kho subtilis không đủ ngay để đi tới đúng vFinal do hàm này trả về, người gọi tự lùi lại.)
- */
-function computeFinalTargetV(orderedB, gClausii, vTarget) {
-  const curB = { idx: 0, usedCFU: 0 };
-  consumeExactCFU(orderedB, curB, gClausii * 1000 * vTarget);
-  if (curB.usedCFU <= EPS || curB.idx >= orderedB.length) return vTarget; // đã sạch hoặc đã cạn kho tại vTarget.
-  const finishB = finishCurrentBottleV(orderedB, curB, gClausii);
-  return Number.isFinite(finishB) ? vTarget + finishB : vTarget;
-}
-
-/** V lớn nhất đạt được từ TOÀN BỘ 1 luồng (bắt đầu từ đầu danh sách) mà KHÔNG vượt quá vCeiling,
- * CHỈ tính bằng các lô TRỌN VẸN (không bao giờ cắt dở 1 lô giữa chừng) — dùng để tìm đúng ranh giới
- * SẠCH gần nhất của clausii mà vẫn nằm trong khả năng thật của subtilis, khi kho subtilis không đủ
- * để đóng nốt lô clausii mà vFinal tự nhiên (computeFinalTargetV) cần tới (xem packTwoStreamBatches,
- * nguyên tắc "không bao giờ để dở clausii" — chốt NCV).
- */
-function largestCleanCheckpointAtMost(orderedLots, d, vCeiling) {
-  let v = 0;
-  for (const lot of orderedLots) {
-    const lotV = cfuOfLot(lot) / (1000 * d);
-    if (v + lotV > vCeiling + EPS) break;
-    v += lotV;
-  }
-  return v;
-}
-
-/**
- * Đóng mẻ cho SP 2 thành phần: với MỖI mẻ, xác định thể tích V an toàn cho CẢ HAI luồng TRƯỚC
- * (dựa trên những gì thực sự lấy được liên tục từ vị trí hiện tại của từng luồng), rồi mới rút
- * ĐÚNG lượng bào tử cần cho V đó Ở ĐÚNG MẬT ĐỘ ĐÍCH của từng luồng (gSubtilis/gClausii) — KHÔNG
- * quy về 1 mật độ đã "khớp tỉ lệ" tính sẵn cho cả nhịp (cách cũ: chọn trước 1 tập lô mỗi luồng
- * sao cho tổng bào tử khớp tỉ lệ đích rồi ép dùng hết — hễ tỉ lệ kho thực tế lệch tỉ lệ đích,
- * luồng dư sẽ bị ép pha ở mật độ cao vọt hẳn so với đích, rất phí NL).
+ * mode = "tronChaiClausii" (mặc định): đúng 3 nguyên tắc trên.
+ * mode = "tronMePha" (NCV thêm 2026-10-08): pha ĐỦ đúng lượng N, chấp nhận chai clausii cuối dùng dở
+ *   (dư lại trong kho) — thay bước 1 bằng "trải clausii theo FIFO tới đúng thể tích cần", mọi bước
+ *   còn lại (subtilis chỉ dở 1 chai, chia mẻ, đong tròn 0.5L) giữ nguyên. Dùng khi cần pha đủ số ống.
  *
- * Đúng theo cách NCV làm tay: CHAI ĐÃ MỞ (đã chạm tới) LUÔN PHẢI DÙNG HẾT, không để dở dang. Thay
- * vì chỉ nhắm vTarget rồi mở thêm 1 nhánh riêng "dọn nốt" (từng khiến mẻ dọn nốt tự do múc tới tận
- * mốc mềm ~1000L, vô tình mở tràn lan chai mới rồi lại phải dọn tiếp, tổng sản lượng vọt lên gấp
- * nhiều lần N), hàm này tính TRƯỚC đúng 1 lần tổng thể tích thật sự cần pha (vFinal >= vTarget, xem
- * computeFinalTargetV) rồi chia mẻ ĐỀU cho cả phần "chính" lẫn phần "dọn nốt" bằng ĐÚNG 1 cơ chế
- * mốc mềm động — không mẻ nào bị ép kịch trần hay teo tóp kịch sàn bất thường chỉ vì đang ở giai
- * đoạn dọn nốt. T có thể nhỉnh hơn N (chai dở buộc phải dọn hết) — chấp nhận được, NCV xem rồi tự
- * quyết. Nhờ rút đúng mật độ đích mỗi mẻ (không quy về 1 mật độ đã khớp tỉ lệ sẵn từ đầu), phần
- * "dọn nốt" cũng không làm mật độ vọt lên vô lý — chỉ có thể nhỉnh nhẹ do quy tròn NL 0.5L.
- */
-function packTwoStreamBatches(subtilisLots, gSubtilis, clausiiLots, gClausii, tankMaxL, maxLotsPerBatch, vTarget) {
-  const orderedA = [...subtilisLots].sort(fifoCompare);
-  const orderedB = [...clausiiLots].sort(fifoCompare);
-  const curA = { idx: 0, usedCFU: 0 };
-  const curB = { idx: 0, usedCFU: 0 };
-
-  const vFinalClausiiClean = computeFinalTargetV(orderedB, gClausii, vTarget);
-  const vCap = vTarget * MAX_CLOSING_OVERSHOOT;
-  // Trần vật lý thật sự của subtilis — TOÀN BỘ kho đã chọn, KHÔNG giới hạn theo ranh giới lô sản
-  // xuất (subtilis được phép dở dang nên không cần dừng đúng ranh giới lô như clausii).
-  const subtilisTotalCapV = maxAvailableV(orderedA, { idx: 0, usedCFU: 0 }, gSubtilis, false);
-
-  let vFinal;
-  let cappedByOvershoot = false;
-  let subtilisShortfallLot = null; // mã lô clausii KHÔNG mở được do thiếu subtilis (nếu có, xem dưới)
-  if (vFinalClausiiClean <= subtilisTotalCapV + EPS) {
-    // Đủ subtilis để đóng nốt clausii như bình thường -> áp trần overshoot NHƯ CŨ, không đổi (chốt
-    // NCV cũ: dồn mật độ khi vướng trần +20%, xem drainBottle bên dưới).
-    vFinal = Math.min(vFinalClausiiClean, vCap);
-    cappedByOvershoot = vFinalClausiiClean > vCap + EPS;
-  } else {
-    // MỚI (chốt NCV): kho subtilis KHÔNG đủ để đóng nốt lô clausii mà vFinalClausiiClean cần tới —
-    // TUYỆT ĐỐI không dồn mật độ để né (khác cappedByOvershoot ở trên) — LÙI thẳng về đúng ranh giới
-    // lô clausii SẠCH gần nhất còn nằm trong khả năng thật của subtilis (và vẫn không vượt trần
-    // overshoot), chấp nhận T thấp hơn N. Báo lại đúng mã lô clausii bị "kẹt" để NCV biết cần bổ
-    // sung subtilis nếu muốn đạt đủ N ống.
-    const ceiling = Math.min(subtilisTotalCapV, vCap);
-    vFinal = largestCleanCheckpointAtMost(orderedB, gClausii, ceiling);
-    const probe = { idx: 0, usedCFU: 0 };
-    consumeExactCFU(orderedB, probe, gClausii * 1000 * vFinal);
-    subtilisShortfallLot = probe.idx < orderedB.length ? orderedB[probe.idx].maLo : null;
-  }
-  const nBatchesTarget = Math.max(1, Math.ceil(vFinal / SOFT_TARGET_L - EPS));
-
-  const batches = [];
-  let remainingV = vFinal;
-  let guard = 0;
-  let pinnedFinalV = null; // xem chú thích ở nơi gán bên trong vòng lặp.
-  while (remainingV > EPS && guard++ < 10000) {
-    // Mốc mềm ĐỘNG: chia đều phần V còn lại (kể cả phần "dọn nốt") cho số mẻ còn lại ước tính —
-    // mẻ đầu tự nhường bớt cho mẻ cuối, tránh orphan 1 mẩu lẻ tẻ ở cuối (xem giải thích ở
-    // packSingleStreamBatches).
-    const softTargetNow = clamp(remainingV / Math.max(1, nBatchesTarget - batches.length), MIN_BATCH_L, SOFT_TARGET_L);
-    // NHÌN TRƯỚC nhiều tổ hợp "lấy bao nhiêu lô từ mỗi bên" để tìm tổ hợp CÂN ĐỐI NHẤT (tỉ lệ vA/vB
-    // gần 1 nhất) — thay vì chỉ lấy tới hết ranh giới lô sản xuất hiện tại như trước (kiểu FIFO
-    // thuần, dễ ghép ra mẻ lệch mật độ nặng khi kích cỡ/mật độ 2 chủng không khớp — chốt lại với
-    // NCV 2026-07-29 sau khi thấy ca thực tế 1 mẻ dư subtilis 13%, mẻ khác dư clausii, mẻ cuối dư
-    // gấp 3 lần đích: "cần rà tất cả các chai NL rồi ghép mẻ pha thật chuẩn, không phải nhặt vài
-    // chai xong cố ép vào"). Nếu không tìm được tổ hợp nào (vd 1 luồng đã cạn sạch kho), rơi về
-    // đúng cách cũ (maxAvailableV, giới hạn theo ranh giới lô sản xuất) làm phương án dự phòng.
-    const matched = findBestMatchedLots(orderedA, curA, gSubtilis, orderedB, curB, gClausii, maxLotsPerBatch);
-    const effectiveMaxLots = maxLotsPerBatch;
-    const maxA = matched ? matched.vA : maxAvailableV(orderedA, curA, gSubtilis, true);
-    const maxB = matched ? matched.vB : maxAvailableV(orderedB, curB, gClausii, true);
-
-    // Đảm bảo tổng số lô (gộp 2 luồng) chạm trong mẻ ≤ giới hạn (effectiveMaxLots) — nếu vượt,
-    // nhị phân thu nhỏ V. Áp DÙNG CHUNG cho cả V "theo tổ hợp cân đối" lẫn V "nới qua ranh giới"
-    // bên dưới — nếu áp SAU khi đã nới thì phần nới có thể bị cắt trở lại về rất nhỏ do vướng đúng
-    // giới hạn số lô, khiến việc nới thành vô nghĩa (mẻ vẫn nhỏ y như chưa nới).
-    const touchedAt = (vv) => peekTouchedLotCount(orderedA, curA, gSubtilis * 1000 * vv) + peekTouchedLotCount(orderedB, curB, gClausii * 1000 * vv);
-    const capByLotCount = (vv) => {
-      if (touchedAt(vv) <= effectiveMaxLots) return vv;
-      let lo = 0, hi = vv;
-      for (let it = 0; it < 60; it++) {
-        const mid = (lo + hi) / 2;
-        if (touchedAt(mid) <= effectiveMaxLots) lo = mid; else hi = mid;
-      }
-      return lo;
-    };
-
-    let V = capByLotCount(Math.min(maxA, maxB, softTargetNow, tankMaxL, remainingV));
-
-    // Nếu mẻ sẽ ra QUÁ VƠI (dưới sàn cứng) CHỈ VÌ đang bị chặn bởi ranh giới lô sản xuất (chưa hết
-    // kho, chưa kịch trần tank/mốc mềm/vFinal, chưa vướng giới hạn 3 lô) — đúng cách NCV làm tay:
-    // "mẻ còn nhỏ thì mở thêm chai (cả 2 phía) cho tới khi mẻ đủ lớn" — nới ranh giới cho mẻ NÀY
-    // băng luôn qua lô sản xuất kế tiếp (đánh dấu trộn lô sản xuất, tự tính từ danh sách lô đã chạm
-    // bên dưới), VẪN tuân thủ đúng giới hạn 3 lô/mẻ khi nới. Chỉ nới khi CHÍNH ranh giới lô sản xuất
-    // là nút thắt — nếu nới ra mà vẫn vướng đúng giới hạn 3 lô (capByLotCount lại cắt về nhỏ), coi
-    // như bó tay thật sự, giữ nguyên V co theo ranh giới (giới hạn vật lý không tránh được, đã chốt
-    // với NCV: tối đa 3 chai/mẻ).
-    if (V < MIN_BATCH_L - EPS && V < Math.min(softTargetNow, tankMaxL, remainingV) - EPS) {
-      const maxAFull = maxAvailableV(orderedA, curA, gSubtilis, false);
-      const maxBFull = maxAvailableV(orderedB, curB, gClausii, false);
-      const vExtended = capByLotCount(Math.min(maxAFull, maxBFull, softTargetNow, tankMaxL, remainingV));
-      if (vExtended > V + EPS) V = vExtended;
-    }
-
-    // Tránh để lại "mẩu vụn" NL THÔ (rawF ≤ MIN_LOT_FRAGMENT_L lít) của lô đang dở dang cho mẻ SAU
-    // — nếu rút đúng V này sẽ chừa lại 1 mẩu quá nhỏ ở lô đang chạm cuối cùng (1 hoặc cả 2 luồng),
-    // nới thêm V đúng bằng bumpV (thể tích cần thêm để rút hết đúng phần rawF đó) để dùng NỐT LUÔN
-    // lô đó ngay mẻ này — GIỚI HẠN bởi maxA/maxB (không nới quá lượng thực có của luồng KIA) lẫn
-    // trần tank/lô sản xuất/3 lô. LÀM TỪNG BƯỚC NHỎ (lặp), KHÔNG bump thẳng bằng max(bumpA,bumpB)
-    // trong 1 lần — vì bù hẳn cho luồng cần nhiều hơn có thể "đá" luồng còn lại (vừa xong xuôi) đi
-    // quá đà, làm lộ ra 1 mẩu vụn MỚI ngay trong LÔ TIẾP THEO của chính luồng đó (y hệt cơ chế xen
-    // kẽ đã gặp ở computeFinalTargetV) — mỗi vòng chỉ giải quyết bên cần ÍT hơn trước, rồi tính lại
-    // từ đầu vì trạng thái đã đổi. Đúng chốt NCV: "0.5L hay 1L thật sự quá nhỏ... tăng nước/tăng
-    // mật độ thành phẩm cũng không sao hết" — ưu tiên mẻ gọn hơn là né tuyệt đối mọi mẩu vụn. LƯU
-    // Ý: so sánh ngưỡng phải dùng rawF (lít NL thô), KHÔNG PHẢI bumpV (thể tích pha loãng — có thể
-    // lớn hơn rawF rất nhiều lần với lô đậm đặc) — bug từng gặp khiến ngưỡng không kích hoạt được.
-    for (let fragGuard = 0; fragGuard < 6; fragGuard++) {
-      const leftoverA = peekLeftoverInBoundaryLot(orderedA, curA, gSubtilis, V);
-      const leftoverB = peekLeftoverInBoundaryLot(orderedB, curB, gClausii, V);
-      const bumpA = leftoverA.rawF > EPS && leftoverA.rawF <= MIN_LOT_FRAGMENT_L + EPS ? leftoverA.bumpV : 0;
-      const bumpB = leftoverB.rawF > EPS && leftoverB.rawF <= MIN_LOT_FRAGMENT_L + EPS ? leftoverB.bumpV : 0;
-      if (bumpA <= EPS && bumpB <= EPS) break;
-      const bump = bumpA > EPS && bumpB > EPS ? Math.min(bumpA, bumpB) : Math.max(bumpA, bumpB);
-      const vBumped = capByLotCount(Math.min(V + bump, maxA, maxB, tankMaxL, remainingV));
-      if (vBumped <= V + EPS) break;
-      V = vBumped;
-    }
-
-    // Chiều NGƯỢC LẠI: từ khi cho phép tìm tổ hợp cân đối băng qua ranh giới lô sản xuất
-    // (findBestMatchedLots), V đôi khi vừa "gặm" 1 miếng xíu (≤ MIN_LOT_FRAGMENT_L) của 1 lô HOÀN
-    // TOÀN MỚI rồi bị mốc mềm/trần tank/giới hạn số lô chặn lại giữa chừng — để lại phần LỚN lô đó
-    // cho mẻ sau (đúng ca thực tế gặp: mẩu 0.5L/9.5L). LÙI V lại đúng bằng phần vừa gặm để lô đó
-    // dành NGUYÊN VẸN cho mẻ sau, khôi phục lại đúng điểm dừng sạch ở ranh giới lô sản xuất — cùng
-    // kỹ thuật "mỗi vòng chỉ giải quyết bên cần ÍT hơn trước" như khối nới V ở trên, chỉ khác chiều.
-    for (let nibbleGuard = 0; nibbleGuard < 6; nibbleGuard++) {
-      const nibbleA = peekNewLotNibble(orderedA, curA, gSubtilis, V);
-      const nibbleB = peekNewLotNibble(orderedB, curB, gClausii, V);
-      const shrinkA = nibbleA.rawF > EPS && nibbleA.rawF <= MIN_LOT_FRAGMENT_L + EPS ? nibbleA.shrinkV : 0;
-      const shrinkB = nibbleB.rawF > EPS && nibbleB.rawF <= MIN_LOT_FRAGMENT_L + EPS ? nibbleB.shrinkV : 0;
-      if (shrinkA <= EPS && shrinkB <= EPS) break;
-      const shrink = shrinkA > EPS && shrinkB > EPS ? Math.min(shrinkA, shrinkB) : Math.max(shrinkA, shrinkB);
-      const vShrunk = V - shrink;
-      if (vShrunk >= V - EPS || vShrunk <= EPS) break;
-      V = vShrunk;
-    }
-    if (!Number.isFinite(V) || V <= EPS) break; // hết sạch 1 trong 2 luồng (không thể dọn nốt được nữa) -> dừng, phần đã có sẽ được đối chiếu sàn 90%.
-
-    const takenA = consumeExactCFU(orderedA, curA, gSubtilis * 1000 * V);
-    const takenB = consumeExactCFU(orderedB, curB, gClausii * 1000 * V);
-    const subtilis = takenA.map((t) => ({ maLo: t.maLo, E: t.E, theTichRaw: t.F }));
-    const clausii = takenB.map((t) => ({ maLo: t.maLo, E: t.E, theTichRaw: t.F }));
-    remainingV -= V;
-
-    // Xem trước (không mutate) phần còn lại của CHAI ĐANG DỞ DANG tại cursor (nếu có) — dùng cho cả
-    // 2 cơ chế "dồn nốt không thêm nước" bên dưới.
-    const peekBottleLeftoverF = (cur, ordered) => {
-      if (cur.usedCFU <= EPS || cur.idx >= ordered.length) return 0;
-      const lot = ordered[cur.idx];
-      return (cfuOfLot(lot) - cur.usedCFU) / (1000 * lot.E);
-    };
-    // Dồn THẲNG phần còn lại của chai đang dở dang vào NGAY mẻ này, KHÔNG THÊM NƯỚC (không đổi V) —
-    // làm NGAY TẠI ĐÂY (trước bước làm tròn 0.5L) để đi qua đúng luồng roundRawTwoStream như mọi
-    // phần khác, tránh để lại số lẻ xấu. Chấp nhận mật độ mẻ này dư cao hơn đích.
-    const drainBottle = (cur, ordered, list) => {
-      const remainingF = peekBottleLeftoverF(cur, ordered);
-      if (remainingF <= EPS) return;
-      const lot = ordered[cur.idx];
-      const existing = list.find((x) => x.maLo === lot.maLo);
-      if (existing) existing.theTichRaw += remainingF;
-      else list.push({ maLo: lot.maLo, E: lot.E, theTichRaw: remainingF });
-      cur.idx += 1;
-      cur.usedCFU = 0;
-    };
-
-    // CHỈ dồn nốt (không thêm nước) khi đây là bước đóng CUỐI CÙNG của cả nhịp (remainingV vừa cạn)
-    // VÀ đã bị chặn trần overshoot — KHÔNG áp dụng bừa cho MỌI mẻ (đã thử — làm lệch quỹ đạo tiêu
-    // thụ thực tế so với vFinalClausiiClean đã tính trước, khiến trần 20% bị PHÁ VỠ, T ra tới 1.4x thay
-    // vì ≤1.2x — nghiêm trọng hơn hẳn việc còn sót 1 mẩu <1L ở mẻ giữa chừng. Trần sản lượng là ưu
-    // tiên cao nhất theo đúng chốt của NCV, hơn cả việc né tuyệt đối mọi mẩu vụn).
-    // CHỈ dồn nốt CLAUSII (không phải cả 2 luồng như bản cũ) — nguyên tắc 4 mới (2026-07-29, cùng
-    // ngày): subtilis được PHÉP để dở dang, KHÔNG cần/KHÔNG NÊN ép dồn hết vào đây nữa. Bản cũ dồn
-    // cả subtilis từng đúng khi CẢ 2 luồng bắt buộc dùng hết 100% ngang nhau — nay đã đổi, dồn cả
-    // subtilis vào đây sẽ gây ĐÚNG bug NCV báo (mẻ cuối dư mật độ subtilis rất nặng dù không cần
-    // thiết — chai subtilis đang dở đáng lẽ được để dở, không phải vét sạch cho hết chai).
-    let batchCapped = false;
-    if (cappedByOvershoot && remainingV <= EPS) {
-      drainBottle(curB, orderedB, clausii);
-      // GHIM lại đúng V TRƯỚC KHI dồn — recomputeBatchVolumes bên dưới tính V từng mẻ ĐỘC LẬP từ
-      // CFU thực tế (không biết gì về việc "không được thêm nước"), nếu không ghim lại thì CFU vừa
-      // dồn thêm (có thể gần bằng nguyên 1 lô) sẽ bị hiểu thành "mẻ này thật ra cần nhiều nước hơn"
-      // và tự ý bơm nước lên lại — phá vỡ đúng trần vừa chặn. Áp dụng lại giá trị này SAU khi
-      // recomputeBatchVolumes chạy xong (xem bên dưới).
-      pinnedFinalV = V;
-      // Đánh dấu mẻ này đã bị ghim (capped) — nếu SAU đó mergeSparseBatches ghép mẻ tí hon này vào
-      // mẻ liền kề (vì < 500L), mergeTwoStreamBatches PHẢI biết để không "hồi sinh" lại đúng phần V
-      // vừa bị ghim (xem bug thật gặp 2026-07-29: mẻ tí hon 2.02L chứa CFU clausii dồn thêm được ghép
-      // vào mẻ trước, mergeTwoStreamBatches tính lại V ĐỘC LẬP từ tổng CFU mới → V vọt lên 879L, vượt
-      // hẳn trần 839,52L vừa chặn — vì phép ghép không biết mẻ tí hon này đã cố tình "không thêm
-      // nước").
-      batchCapped = true;
-    }
-
-    const tronLoSanXuatA = new Set(subtilis.map((t) => loSanXuatOf(t))).size > 1;
-    batches.push({
-      meSo: batches.length + 1,
-      tongTheTich: V,
-      capped: batchCapped,
-      tronLoSanXuat: tronLoSanXuatA,
-      loSanXuatList: Array.from(new Set([...subtilis.map(loSanXuatOf), ...clausii.map(loSanXuatOf)])),
-      // Riêng danh sách lô sản xuất CỦA CLAUSII — dùng để cảnh báo tiệt trùng RIÊNG khi vừa dùng hết
-      // 1 lô clausii (nguyên tắc 2, tách biệt khỏi cảnh báo chung 3-lô ở App.jsx computeSterilizeFlags).
-      clausiiLoSanXuatList: Array.from(new Set(clausii.map(loSanXuatOf))),
-      subtilis,
-      clausii,
-    });
-  }
-
-  // Làm tròn thể tích NGUYÊN LIỆU hiển thị/đong thực tế về bội số 0.5L cho từng luồng (làm tròn
-  // LÊN cho mọi lần đong — kể cả phần cuối 1 lô, MIỄN vẫn còn nằm trong lượng thật của chai đó;
-  // chỉ giữ nguyên số dư chính xác khi lô đã thật sự dùng hết đúng 100%, xem roundRawTwoStream).
-  const subtilisByMaLo = Object.fromEntries(subtilisLots.map((l) => [l.maLo, l]));
-  const clausiiByMaLo = Object.fromEntries(clausiiLots.map((l) => [l.maLo, l]));
-  roundRawTwoStream(batches, "subtilis", subtilisByMaLo);
-  roundRawTwoStream(batches, "clausii", clausiiByMaLo);
-  // Bỏ các lần đong tròn về đúng 0 (mẻ trước cùng lô đã "vay" hết) + mẻ nào rỗng hẳn cả 2 luồng
-  // thì loại bỏ, rồi tính lại danh sách lô sản xuất cho đúng thực tế còn lại.
-  const pruned = pruneZeroEntries(batches);
-  recomputeLoSanXuatMeta(pruned);
-  // Rồi TÍNH LẠI V (nước pha) từng mẻ trực tiếp từ CFU thực tế (sau làm tròn) / mật độ ĐÍCH —
-  // giống hệt nguyên tắc "suy V từ F" ở SP 1 thành phần: mẻ có NL dư do làm tròn lên thì được
-  // THÊM NƯỚC tương ứng để mật độ không vọt lên vô ích và mẻ không bị co nhỏ giả tạo; mẻ nào bị
-  // hụt CFU (do mẻ trước cùng lô đã "vay" phần dư 0.5L) thì rút bớt nước — dù tăng hay giảm,
-  // mật độ luôn nằm sát mật độ đích G, không bao giờ tụt dưới.
-  recomputeBatchVolumes(pruned, gSubtilis, gClausii, tankMaxL);
-
-  // GHIM LẠI V của mẻ vừa "dồn nốt không thêm nước" (nếu có, xem pinnedFinalV ở vòng lặp trên) —
-  // recomputeBatchVolumes ở trên tính V ĐỘC LẬP theo CFU thực tế của TỪNG mẻ (không biết gì về ý
-  // định "không thêm nước"), nên CFU dồn thêm sẽ bị hiểu nhầm thành "mẻ này cần nhiều nước hơn" và
-  // tự ý bơm V lên lại — phá vỡ đúng trần overshoot vừa chặn. Ép về ĐÚNG giá trị đã ghim (không bao
-  // giờ ép cao lên, chỉ có thể ép XUỐNG nếu recompute tính ra cao hơn) để mật độ hấp thụ chênh lệch
-  // như đã định, không phải thể tích.
-  if (pinnedFinalV != null && pruned.length > 0) {
-    pruned[pruned.length - 1].tongTheTich = Math.min(pruned[pruned.length - 1].tongTheTich, pinnedFinalV);
-  }
-
-  const merged = mergeSparseBatches(pruned, {
-    tankMaxL,
-    maxLotsPerBatch,
-    mergeBatches: (a, b) => mergeTwoStreamBatches(a, b, gSubtilis, gClausii),
-    lotCountOf: (b) => b.subtilis.length + b.clausii.length,
-    // SP 2 thành phần pha CHUNG 1 tank — 1 mẻ THIẾU HẲN 1 luồng (0 subtilis hoặc 0 clausii) là mẻ
-    // sai công thức, không phải chỉ "hơi vơi", nên phải ép ghép bất kể thể tích đang lớn cỡ nào.
-    needsMerge: (b) => b.tongTheTich < MIN_BATCH_L - EPS || b.subtilis.length === 0 || b.clausii.length === 0,
-  });
-
-  // KHÔNG cắt bớt NL luồng "dư" về đúng mức cần nữa (khác bản trước) — NCV chốt rõ: chai đã mở
-  // phải dùng hết 100%, thà mật độ nhỉnh nhẹ do quy tròn 0.5L còn hơn báo "dùng X lít" mà thực ra
-  // chỉ tính có (X trừ phần cắt) lít, để lại 1 chai dở dang không đúng thực tế đong. (Phần dồn CFU
-  // "dọn nốt" khi bị chặn trần overshoot đã xử lý NGAY TRONG vòng lặp chính ở trên — trước bước làm
-  // tròn — để đi qua đúng luồng roundRawTwoStream như mọi phần khác, không để lại số lẻ xấu.)
-  return { batches: merged, subtilisShortfallLot };
-}
-
-// lotByMaLo: tra cứu F GỐC THẬT (cả chai, từ đúng kho subtilisLots/clausiiLots truyền vào
-// packTwoStreamBatches) — cần để phân biệt 2 tình huống ở phần CUỐI cùng của 1 lô: (a) lô đã dùng
-// ĐÚNG HẾT 100% (tổng các phần == F gốc) -> PHẢI giữ nguyên số dư chính xác, làm tròn lên sẽ thành
-// "bịa" thêm NL không có thật; (b) lô mới dùng 1 PHẦN rồi dừng (luồng KIA đã cạn sạch toàn bộ kho,
-// không còn gì để ghép tiếp) — phần còn lại VẪN CÒN NGUYÊN trong chai, nên làm tròn lên tới 0.5L
-// gần nhất là AN TOÀN (còn dư sẵn trong kho để bù), giúp NCV đong số đẹp thay vì số lẻ như 3.93L.
-function roundRawTwoStream(batches, streamKey, lotByMaLo) {
-  const lotPortions = {};
-  batches.forEach((b) => {
-    b[streamKey].forEach((entry) => { (lotPortions[entry.maLo] ||= []).push(entry); });
-  });
-  Object.values(lotPortions).forEach((portions) => {
-    // Chụp lại RAW gốc (trước khi làm tròn/mutate) của TỪNG phần — cần để tính "phần cần dành lại
-    // cho các phần SAU" bên dưới, tránh bug nghiêm trọng từng gặp: 1 phần KHÔNG PHẢI cuối cùng làm
-    // tròn lên "ăn" hết luôn cả phần RAW mà 1 phần SAU nó (thuộc 1 mẻ KHÁC) đang cần — nếu phần sau
-    // đó là NGUỒN DUY NHẤT của luồng này trong mẻ đó, mẻ đó sẽ bị làm tròn về 0 và bị prune mất luôn,
-    // để lại 1 mẻ MỒ CÔI thiếu hẳn 1 luồng (vd chỉ còn subtilis, mất sạch clausii) — rất nguy hiểm vì
-    // trông như 1 mẻ hợp lệ nhưng thực chất sai công thức hoàn toàn. Phát hiện 2026-07-29 khi thêm
-    // thuật toán ghép cân đối (matching) tạo ra 1 ca thực tế trúng đúng ranh giới này.
-    const rawValues = portions.map((p) => p.theTichRaw);
-    const lotTotal = rawValues.reduce((s, v) => s + v, 0);
-    const trueF = lotByMaLo?.[portions[0].maLo]?.F ?? lotTotal;
-    let already = 0;
-    portions.forEach((entry, idx) => {
-      const isLast = idx === portions.length - 1;
-      let rawUsed;
-      if (!isLast) {
-        // Chỉ được làm tròn lên trong phạm vi CHỪA LẠI ĐỦ TỐI THIỂU 1 bước 0.5L cho MỖI phần còn lại
-        // phía sau — KHÔNG PHẢI chừa nguyên lượng RAW CHƯA làm tròn của chúng (bug đã gặp 2026-07-29:
-        // dùng đúng tổng RAW làm reserve khiến ceiling gần như luôn khít đúng bằng rawValues[idx],
-        // không còn dư ra dù chỉ 1 bước 0.5L để làm tròn LÊN — kết quả CẢ 2 phần đều bị bỏ ngỏ không
-        // tròn, hiện số lẻ xấu như 6.91L/2.09L thay vì 7.0L/2.0L, dù tổng vẫn đúng và không hề mồ côi
-        // — vi phạm nguyên tắc "NL đong bội số 0.5L"). Chừa tối thiểu 0.5L/phần vẫn đủ AN TOÀN để né
-        // mẻ mồ côi (chứng minh quy nạp: nếu phần còn lại >= (số phần còn lại)×0.5L trước khi xử lý
-        // phần này, ceiling >= 0.5L nên phần này luôn được rảnh tối thiểu 1 bước để tròn, và tổng còn
-        // lại sau đó vẫn giữ đúng bất biến cho các phần kế tiếp) — miễn lotTotal đủ lớn so với số phần
-        // (luôn đúng trong thực tế, vì lô quá vụn đã bị né từ sớm bởi MIN_LOT_FRAGMENT_L).
-        const reserveForRest = RAW_ROUND_STEP_L * (portions.length - 1 - idx);
-        rawUsed = clamp(Math.ceil(rawValues[idx] / RAW_ROUND_STEP_L) * RAW_ROUND_STEP_L, 0, lotTotal - already - reserveForRest);
-      } else {
-        const exact = lotTotal - already;
-        const roundedUp = Math.ceil(exact / RAW_ROUND_STEP_L) * RAW_ROUND_STEP_L;
-        // Chỉ làm tròn lên nếu TỔNG CỘNG đã dùng (already + roundedUp, không phải chỉ riêng phần
-        // cuối này) vẫn còn NẰM TRONG lượng thật của chai — nếu lô đã dùng đúng hết 100% (lotTotal
-        // == trueF), làm tròn lên sẽ "bịa" thêm NL không có thật, giữ nguyên số dư chính xác. BUG đã
-        // gặp: so sánh nhầm CHỈ `roundedUp` (riêng phần cuối) với `trueF` (cả chai) — với lô có ≥2
-        // phần (already > 0), phép so sánh sai này gần như luôn đúng (vì 1 phần lẻ luôn nhỏ hơn cả
-        // chai), khiến vẫn làm tròn lên dù tổng đã vượt quá trueF thật — chính là nguyên nhân gây mẻ
-        // "mồ côi"/mật độ ảo tăng vọt phát hiện 2026-07-29 khi thêm thuật toán ghép cân đối.
-        rawUsed = already + roundedUp <= trueF + EPS ? roundedUp : exact;
-      }
-      already += rawUsed;
-      entry.theTichRaw = rawUsed;
-    });
-  });
-}
-
-function mergeLotArrays(a, b) {
-  const merged = a.map((x) => ({ ...x }));
-  for (const l of b) {
-    const existing = merged.find((x) => x.maLo === l.maLo);
-    if (existing) existing.theTichRaw += l.theTichRaw;
-    else merged.push({ ...l });
-  }
-  return merged;
-}
-
-// LƯU Ý: không thể chỉ cộng V_a+V_b như bên 1 thành phần — nếu 1 trong 2 mẻ nguồn THIẾU HẲN 1
-// luồng (0 subtilis hoặc 0 clausii, mật độ luồng đó = 0), cộng thẳng V sẽ pha loãng luồng còn lại
-// của mẻ kia xuống dưới đích. Phải TÍNH LẠI V từ đúng tổng CFU/mật độ đích sau khi gộp raw.
-// CỐ Ý KHÔNG chặn ở tankMaxL tại đây (khác packTwoStreamBatches) — nếu chặn ở đây, phần CFU vượt
-// trần sẽ bị "biến mất" âm thầm (đã cộng vào NL nhưng mật độ báo cáo lại giả vờ như mẻ chỉ nhiêu
-// đó thể tích, đội mật độ báo cáo lên cao vọt) mà không hề được cảnh báo. Để mergeSparseBatches ở
-// trên tự KIỂM TRA merged.tongTheTich so với tankMaxL và TỪ CHỐI ghép nếu vượt trần thật sự.
-function mergeTwoStreamBatches(a, b, gSubtilis, gClausii) {
-  const subtilis = mergeLotArrays(a.subtilis, b.subtilis);
-  const clausii = mergeLotArrays(a.clausii, b.clausii);
-  const loSanXuatList = Array.from(new Set([...(a.loSanXuatList || []), ...(b.loSanXuatList || [])]));
-  const cfuA = subtilis.reduce((s, e) => s + e.E * e.theTichRaw, 0) * 1000;
-  const cfuB = clausii.reduce((s, e) => s + e.E * e.theTichRaw, 0) * 1000;
-  const vCapA = cfuA > EPS ? cfuA / (1000 * gSubtilis) : Infinity;
-  const vCapB = cfuB > EPS ? cfuB / (1000 * gClausii) : Infinity;
-  let tongTheTich = cfuA <= EPS && cfuB <= EPS ? 0 : Math.min(vCapA, vCapB);
-  // Nếu 1 trong 2 mẻ nguồn đã bị GHIM (capped, xem packTwoStreamBatches — mẻ đóng cuối bị chặn trần
-  // overshoot nên "dồn CFU clausii không thêm nước") — TUYỆT ĐỐI không để phép tính lại V ở trên vô
-  // tình "hồi sinh" đúng phần nước đã cố tình không thêm (bug thật gặp 2026-07-29: mẻ tí hon 2L chứa
-  // CFU dồn thêm bị ghép vào mẻ trước, tính lại V độc lập theo tổng CFU mới → V vọt vượt hẳn trần vừa
-  // chặn). Trần AN TOÀN cho trường hợp này là tổng V 2 mẻ nguồn (mỗi mẻ đã đúng V của nó rồi, ghép 2
-  // tank lại KHÔNG BAO GIỜ cần nhiều nước hơn tổng 2 tank cộng lại) — lấy giá trị NHỎ HƠN giữa 2 cách
-  // tính. KHÔNG áp quy tắc này cho ca "thiếu hẳn 1 luồng" (mục đích chính của việc tính lại V ở trên)
-  // vì ca đó CẦN được phép tính ra lớn hơn tổng thô để sửa đúng mật độ.
-  const capped = a.capped || b.capped;
-  if (capped) tongTheTich = Math.min(tongTheTich, a.tongTheTich + b.tongTheTich);
-  const clausiiLoSanXuatList = Array.from(new Set(clausii.map((e) => loSanXuatOf(e))));
-  return { meSo: 0, tongTheTich, capped, tronLoSanXuat: loSanXuatList.length > 1, loSanXuatList, clausiiLoSanXuatList, subtilis, clausii };
-}
-
-// Bỏ các lần đong bị làm tròn RA ĐÚNG 0 (do mẻ trước cùng lô đã "vay" hết phần dư 0.5L — xem
-// roundRawTwoStream) — hiển thị "0.00 L" cho 1 lô là vô nghĩa/gây hiểu nhầm. Mẻ nào rỗng CẢ HAI
-// luồng sau khi bỏ (không còn đóng góp gì thật) thì loại bỏ hẳn mẻ đó, không chỉ riêng lô.
-function pruneZeroEntries(batches) {
-  return batches
-    .map((b) => ({
-      ...b,
-      subtilis: b.subtilis.filter((e) => e.theTichRaw > EPS),
-      clausii: b.clausii.filter((e) => e.theTichRaw > EPS),
-    }))
-    .filter((b) => b.subtilis.length > 0 || b.clausii.length > 0);
-}
-
-// Tính lại loSanXuatList/tronLoSanXuat từ đúng các lô CÒN THẬT trong mẻ sau khi đã bỏ lô rỗng —
-// nếu không, 1 lô sản xuất đã bị loại bỏ hoàn toàn (rơi vào trường hợp trên) vẫn còn sót lại
-// trong danh sách, làm sai lệch cảnh báo tiệt trùng/trộn lô.
-function recomputeLoSanXuatMeta(batches) {
-  batches.forEach((b) => {
-    const loSanXuatList = Array.from(new Set([...b.subtilis.map(loSanXuatOf), ...b.clausii.map(loSanXuatOf)]));
-    b.loSanXuatList = loSanXuatList;
-    b.tronLoSanXuat = loSanXuatList.length > 1;
-    b.clausiiLoSanXuatList = Array.from(new Set(b.clausii.map(loSanXuatOf)));
-  });
-}
-
-function recomputeBatchVolumes(batches, gSubtilis, gClausii, tankMaxL) {
-  batches.forEach((b) => {
-    const cfuA = b.subtilis.reduce((s, e) => s + e.E * e.theTichRaw, 0) * 1000;
-    const cfuB = b.clausii.reduce((s, e) => s + e.E * e.theTichRaw, 0) * 1000;
-    if (cfuA <= EPS && cfuB <= EPS) { b.tongTheTich = 0; return; } // mẻ rỗng thật sự — không "tự vẽ" ra nước.
-    const vCapA = cfuA > EPS ? cfuA / (1000 * gSubtilis) : Infinity;
-    const vCapB = cfuB > EPS ? cfuB / (1000 * gClausii) : Infinity;
-    b.tongTheTich = Math.min(vCapA, vCapB, tankMaxL);
-  });
-}
-
-/**
- * Lập kế hoạch mẻ pha cho sản phẩm 2 thành phần (subtilis + clausii pha chung 1 tank).
- * Mỗi mẻ rút CẢ HAI luồng ĐÚNG theo mật độ đích riêng của từng luồng (gSubtilis, gClausii) —
- * KHÔNG quy về 1 mật độ đã "khớp tỉ lệ" tính sẵn cho cả nhịp (cách cũ: chọn trước 1 tập lô mỗi
- * luồng sao cho tổng bào tử khớp tỉ lệ đích rồi ép dùng hết — hễ tỉ lệ kho thực tế lệch tỉ lệ
- * đích, luồng dư sẽ bị ép pha ở mật độ vượt hẳn đích, rất phí NL).
- *
- * Chai đã mở (đã chạm tới) LUÔN phải dùng hết — kể cả khi đã đủ N ống, nếu còn 1 luồng đang dở 1
- * chai thì thuật toán tự pha thêm mẻ "dọn nốt" cho tới khi dùng hết sạch. THỂ TÍCH (và do đó số ống
- * T) không bao giờ vượt quá vTarget*MAX_CLOSING_OVERSHOOT (trần cứng +20%) — nếu dùng hết sạch NL
- * đòi hỏi nhiều nước hơn mức đó, KHÔNG thêm nước nữa mà dồn thẳng CFU còn thiếu vào mẻ cuối, chấp
- * nhận mật độ mẻ đó dư cao hơn đích để "gánh" thay (chốt NCV 2026-07-29: ưu tiên số 1 là không để
- * dư NL — nhất là clausii — nhưng KHÔNG được để tổng thể tích/số ống dư quá 20%; mật độ được phép
- * dư để hấp thụ chênh lệch, UI có cảnh báo khi mật độ dư >3% hoặc T dư >20% để NCV tự xem xét).
- * Chỉ để lại 1 chai dở dang THẬT khi 1 luồng cạn sạch TOÀN BỘ kho đã chọn (không còn chai nào để
- * dọn nốt) — giới hạn vật lý duy nhất không tránh được, ngoài trần overshoot ở trên.
- *
- * @param {{subtilisLots, clausiiLots, product}} args
+ * @param {{subtilisLots, clausiiLots, product, mode}} args
  *   product: { N, H, gSubtilis, gClausii }
  */
-export function planTwoComponent({ subtilisLots, clausiiLots, product, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH }) {
+export function planTwoComponent({ subtilisLots, clausiiLots, product, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH, mode = "tronChaiClausii" }) {
   const { N, H, gSubtilis, gClausii } = product;
-  const vTarget = (N * H) / 1000; // thể tích cần để ra đúng N ống, vì mật độ mỗi luồng luôn = đích
-  const vMin = (TUBE_TOL_LOW * N * H) / 1000; // sàn khả thi tối thiểu (90% đơn)
+  const vTarget = (N * H) / 1000;
+  const orderedA = [...subtilisLots].sort(fifoCompare);
+  let orderedB = [...clausiiLots].sort(fifoCompare);
+  const subtilisTotalCapV = orderedA.reduce((s, l) => s + lotVolumeAt(l, gSubtilis), 0);
 
-  const { batches, subtilisShortfallLot } = packTwoStreamBatches(subtilisLots, gSubtilis, clausiiLots, gClausii, tankMaxL, maxLotsPerBatch, vTarget);
-  const totalV = batches.reduce((s, b) => s + b.tongTheTich, 0);
-
-  if (totalV < vMin - EPS) {
-    // Phân biệt rõ 2 nguyên nhân khác nhau: (a) kho nói chung quá ít (thông báo cũ), (b) kho ĐỦ về
-    // tổng khối lượng nhưng thuật toán CHỦ ĐỘNG dừng sớm hơn vì subtilis không đủ để đóng nốt 1 lô
-    // clausii mà KHÔNG được để dở dang (nguyên tắc bắt buộc, chốt NCV) — NCV cần biết chính xác đây
-    // là do thiếu subtilis (không phải thiếu clausii) để bổ sung đúng thứ cần bổ sung.
-    const reason = subtilisShortfallLot
-      ? `Kho subtilis không đủ để dùng hết lô clausii "${subtilisShortfallLot}" mà không để dở dang (nguyên tắc bắt buộc — clausii không bao giờ được để dở) — kế hoạch chỉ đạt ${totalV.toFixed(1)}L, dưới 90% mục tiêu. Cần bổ sung subtilis hoặc điều chỉnh đơn.`
-      : "Kho subtilis và/hoặc clausii hiện có (đã qua KQKN, ở Chờ pha) không đủ để đạt tối thiểu 90% số ống cần — cần NCV bổ sung nguyên liệu hoặc điều chỉnh đơn.";
-    return { feasible: false, reason, subtilisShortfallLot, maxOng: Math.floor((totalV * 1000) / H) };
+  let V, segsB, shortfallLot = null;
+  let layoutG = { a: gSubtilis, b: gClausii }, listA = orderedA, listB = null, permuteA = false;
+  if (mode === "tronMePha") {
+    // Pha đủ đúng thể tích cần — chỉ bị giới hạn bởi tổng kho thật của từng chủng.
+    const clausiiTotalCapV = orderedB.reduce((s, l) => s + lotVolumeAt(l, gClausii), 0);
+    // Chế độ này KHÔNG bắt buộc lấy clausii theo FIFO (NCV cho phép 2026-10-08) — nhặt tổ hợp chai bất
+    // kỳ khớp nhất với thể tích cần, để chai clausii dư lại ít nhất (lý tưởng là không dư chai nào).
+    const pickedB = chooseClausiiSubset(orderedB, gClausii, Math.min(vTarget, subtilisTotalCapV));
+    const pickedCapV = pickedB.reduce((s, l) => s + lotVolumeAt(l, gClausii), 0);
+    V = Math.min(vTarget, clausiiTotalCapV, subtilisTotalCapV, pickedCapV);
+    orderedB = pickedB;
+    if (V < TUBE_TOL_LOW * vTarget - EPS) {
+      const thieu = [clausiiTotalCapV < vTarget - EPS && "clausii", subtilisTotalCapV < vTarget - EPS && "subtilis"].filter(Boolean).join(" và ");
+      return { feasible: false, reason: `Kho ${thieu} không đủ để pha tối thiểu 90% số ống cần — cần bổ sung nguyên liệu hoặc điều chỉnh đơn.`, subtilisShortfallLot: null, maxOng: Math.floor((V * 1000) / H) };
+    }
+    // Không mở chai MỚI chỉ để lấy < 1L NL (MIN_LOT_FRAGMENT_L) ở cuối nhịp — lùi V về đúng ranh giới
+    // chai đó (sản lượng chỉ hụt rất ít so với N), miễn vẫn ≥ 90% mục tiêu.
+    for (let guard = 0; guard < 4; guard++) {
+      let snapped = false;
+      for (const [ordered, g] of [[orderedB, gClausii], [orderedA, gSubtilis]]) {
+        const segs = layoutLots(ordered, g, V);
+        const last = segs[segs.length - 1];
+        const isPartial = last && last.end - last.start < last.lot.F / last.k - EPS;
+        if (isPartial && last.start > EPS && (V - last.start) * last.k < MIN_LOT_FRAGMENT_L - EPS && last.start >= TUBE_TOL_LOW * vTarget - EPS) {
+          V = last.start;
+          snapped = true;
+        }
+      }
+      if (!snapped) break;
+    }
+    segsB = layoutLots(orderedB, gClausii, V);
+  } else {
+    // 1. Chốt các chai clausii NGUYÊN VẸN — tổ hợp bất kỳ khớp nhất với N (ưu tiên dư hơn hụt).
+    const cands = wholeClausiiCandidates(orderedB, gClausii, vTarget, subtilisTotalCapV);
+    if (!cands.length) {
+      const reason = orderedB.length
+        ? "Kho subtilis không đủ để dùng hết dù chỉ 1 chai clausii — cần bổ sung subtilis."
+        : "Kho clausii hiện có (đã qua KQKN, ở Chờ pha) trống — cần NCV bổ sung nguyên liệu.";
+      return { feasible: false, reason, subtilisShortfallLot: null, maxOng: 0 };
+    }
+    // Phương án lẽ ra khớp N hơn nếu kho subtilis đủ -> báo đúng chai clausii bị kẹt vì thiếu subtilis.
+    const free = wholeClausiiCandidates(orderedB, gClausii, vTarget, Infinity, 1)[0];
+    if (free && free.score < cands[0].score - 1) {
+      shortfallLot = free.lots.find((l) => !cands[0].lots.includes(l))?.maLo ?? null;
+    }
+    // 2. Trong các phương án clausii gần như khớp nhất (lệch thêm ≤ 1% N so với phương án tốt nhất), ưu
+    // tiên phương án mà subtilis cũng có tổ hợp chai NGUYÊN VẸN pha vừa hết — không dư chai nào.
+    let pickB = cands[0];
+    let pickA = null;
+    for (const c of cands) {
+      if (c.score > cands[0].score + 0.01 * vTarget) break;
+      const m = matchSubtilisSubset(orderedA, gSubtilis, c.V);
+      if (m) { pickB = c; pickA = m; break; }
+    }
+    V = pickB.V;
+    listB = pickB.lots;
+    if (pickA) {
+      // Trải CẢ 2 chủng vừa khít đúng vEff (cả 2 cùng dùng hết sạch) — chủng có nhiều bào tử hơn chút
+      // sẽ pha mật độ nhỉnh lên tương ứng (≤ SUBTILIS_MATCH_TOL), không chai nào dở.
+      const vA = pickA.reduce((sum, l) => sum + lotVolumeAt(l, gSubtilis), 0);
+      const vEff = Math.min(V, vA);
+      layoutG = { a: (gSubtilis * vA) / vEff, b: (gClausii * V) / vEff };
+      listA = pickA;
+      permuteA = true;
+      V = vEff;
+    }
   }
 
+  // 3. Chia mẻ tối ưu (segmentBatches) cho từng cách xếp chai đem thử, lấy phương án chi phí thấp nhất.
+  const run = (orderA, segsBUse) => {
+    const segsA = layoutLots(orderA, layoutG.a, V);
+    const endRounding = chooseEndRounding(segsA, segsBUse, V, gSubtilis, gClausii);
+    const r = segmentBatches(segsA, segsBUse, V, tankMaxL, maxLotsPerBatch, gSubtilis, gClausii, endRounding.a, endRounding.b);
+    return r.batches ? r : null;
+  };
+  let chosen = null;
+  if (mode === "tronMePha") {
+    // Thử thêm các cách đảo chai subtilis (xem subtilisOrderCandidates); hoà thì giữ phương án trước.
+    for (const order of subtilisOrderCandidates(orderedA, gSubtilis, V)) {
+      const r = run(order, segsB);
+      if (r && (!chosen || r.cost < chosen.cost - EPS)) chosen = r;
+    }
+  } else {
+    // Tròn chai clausii: chai nào cũng dùng trọn nên thứ tự dùng giữa các chai là tuỳ ý — xuất phát từ
+    // thứ tự cũ -> mới, rồi leo đồi bằng cách chuyển chỗ 1 chai (clausii; subtilis chỉ khi khớp vừa hết
+    // — còn không thì subtilis giữ đúng list cũ -> mới, dở chai cuối) để ranh giới chai 2 chủng khớp
+    // nhau hơn: bớt mẻ lẻ < 700L, bớt số chai/mẻ.
+    // Chỉ chuyển 1 chai đi tối đa MOVE_SPAN vị trí, nhận ngay bước cải thiện đầu tiên, có giới hạn
+    // thời gian — đủ để gỡ các mẻ lẻ mà vẫn tính xong trong khoảng 1–2 giây.
+    const MOVE_SPAN = 3;
+    const deadline = Date.now() + 1500;
+    function* moves(list) {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = Math.max(0, i - MOVE_SPAN); j <= Math.min(list.length - 1, i + MOVE_SPAN); j++) {
+          if (i === j || j === i - 1) continue; // (i, i-1) trùng với (i-1, i)
+          const o = list.filter((_, k) => k !== i);
+          o.splice(j, 0, list[i]);
+          yield o;
+        }
+      }
+    }
+    let curA = listA, curB = listB;
+    chosen = run(curA, layoutLots(curB, layoutG.b));
+    let improved = !!chosen;
+    while (improved && Date.now() < deadline) {
+      improved = false;
+      const tries = [
+        ...[...moves(curB)].map((o) => [curA, o]),
+        ...(permuteA ? [...moves(curA)].map((o) => [o, curB]) : []),
+      ];
+      for (const [oA, oB] of tries) {
+        if (Date.now() >= deadline) break;
+        const r = run(oA, layoutLots(oB, layoutG.b));
+        if (r && r.cost < chosen.cost - EPS) {
+          chosen = r; curA = oA; curB = oB; improved = true;
+          break;
+        }
+      }
+    }
+  }
+  if (!chosen) {
+    return { feasible: false, reason: "Không chia được mẻ pha hợp lệ từ kho hiện có (trần tank / số chai mỗi mẻ).", subtilisShortfallLot: null, maxOng: Math.floor((V * 1000) / H) };
+  }
+  const batches = chosen.batches.map((b, i) => ({ meSo: i + 1, ...b }));
+  recomputeLoSanXuatMeta(batches);
+
+  const totalV = batches.reduce((s, b) => s + b.tongTheTich, 0);
   const T = Math.floor((totalV * 1000) / H);
 
   // Gộp lại lượng NL thực đã dùng theo từng lô (1 lô có thể trải trên nhiều mẻ) để đối soát bào
-  // tử và báo danh sách lô đã dùng — mật độ báo cáo tính từ đúng tổng CFU thực/tổng V thực (luôn
-  // sát đích, có thể nhỉnh lên chút do quy tròn NL 0.5L, không bao giờ tụt dưới).
+  // tử và báo danh sách lô đã dùng — mật độ báo cáo tính từ đúng tổng CFU thực/tổng V thực.
   const aggregateUsed = (streamKey) => {
     const byLo = {};
     batches.forEach((b) => b[streamKey].forEach((e) => {
@@ -1174,9 +963,6 @@ export function planTwoComponent({ subtilisLots, clausiiLots, product, tankMaxL 
   const dSubtilis = totalV > 0 ? cfuSubtilis / (1000 * totalV) : gSubtilis;
   const dClausii = totalV > 0 ? cfuClausii / (1000 * totalV) : gClausii;
 
-  const massBalanceSubtilis = checkMassBalance(usedSubtilis, dSubtilis, T, H);
-  const massBalanceClausii = checkMassBalance(usedClausii, dClausii, T, H);
-
   return {
     feasible: true,
     T,
@@ -1186,12 +972,25 @@ export function planTwoComponent({ subtilisLots, clausiiLots, product, tankMaxL 
     selectedSubtilisLots: usedSubtilis.map((l) => l.maLo),
     selectedClausiiLots: usedClausii.map((l) => l.maLo),
     batches,
-    massBalanceSubtilis,
-    massBalanceClausii,
-    // Khác null khi kho subtilis không đủ để đóng nốt đúng lô clausii này -> T đã bị dừng sớm hơn N
-    // để KHÔNG để dở clausii (chốt NCV) — App.jsx hiển thị cảnh báo riêng, đề nghị bổ sung subtilis.
-    subtilisShortfallLot,
+    massBalanceSubtilis: checkMassBalance(usedSubtilis, dSubtilis, T, H),
+    massBalanceClausii: checkMassBalance(usedClausii, dClausii, T, H),
+    // Khác null khi kho subtilis không đủ để dùng thêm đúng chai clausii này -> T lệch xa N hơn
+    // (App.jsx hiển thị cảnh báo riêng, đề nghị bổ sung subtilis).
+    subtilisShortfallLot: shortfallLot,
   };
+}
+
+// Tính lại loSanXuatList/tronLoSanXuat từ đúng các lô thật trong mẻ — dùng cho cảnh báo tiệt trùng/
+// trộn lô sản xuất ở App.jsx.
+function recomputeLoSanXuatMeta(batches) {
+  batches.forEach((b) => {
+    const loSanXuatList = Array.from(new Set([...b.subtilis.map(loSanXuatOf), ...b.clausii.map(loSanXuatOf)]));
+    b.loSanXuatList = loSanXuatList;
+    // "Trộn lô sản xuất" = ≥2 lô sản xuất của CÙNG 1 chủng trong 1 tank — subtilis và clausii vốn
+    // dĩ luôn khác lô sản xuất nên không tính gộp 2 chủng (nếu gộp thì mẻ nào cũng bị báo trộn).
+    b.tronLoSanXuat = new Set(b.subtilis.map(loSanXuatOf)).size > 1 || new Set(b.clausii.map(loSanXuatOf)).size > 1;
+    b.clausiiLoSanXuatList = Array.from(new Set(b.clausii.map(loSanXuatOf)));
+  });
 }
 
 // ---------------------------------------------------------------------------

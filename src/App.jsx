@@ -17,7 +17,7 @@ import {
 } from "./lib/materialsApi.js";
 import { fetchProfile, fetchProfiles, updateProfile, setUserEmail, requestEmailChange, signUp, adminCreateUser } from "./lib/profilesApi.js";
 import { parseDotSanXuat, parseSoLoDate, productionDate, monthLabelVN } from "./lib/materialsQc.js";
-import { planSingleComponent, planTwoComponent, TANK_MAX_L, MAX_LOTS_PER_BATCH, MAX_CLOSING_OVERSHOOT } from "./lib/mixPlanner.js";
+import { planSingleComponent, planTwoComponent, TANK_MAX_L, MAX_LOTS_PER_BATCH, TUBE_TOL_LOW } from "./lib/mixPlanner.js";
 import { fetchMixPlans, fetchMixPlansByIds, saveMixPlanDecision, saveEditedMixPlanDecision, removeMixPlan, reviewMixPlanWithAi } from "./lib/mixPlansApi.js";
 import { fetchFinishedBatches, createFinishedBatch, updateFinishedBatchField } from "./lib/finishedBatchesApi.js";
 
@@ -35,6 +35,7 @@ const STATUS_LABEL = {
   "cho-kqkn": "Chờ KQKN", "cho-pha": "Chờ pha", "cho-xu-ly": "Chờ xử lý",
   "da-pha": "Đã pha", "da-huy": "Đã huỷ", "cho-sx": "Chờ SX", "cho-xoa": "Thùng rác",
 };
+// Chờ SX chia 2 nhánh: chưa gửi mail ("cho-sx") / đã gửi mail ("cho-sx-da-gui") — xem ChoSXPanel.
 const STRAIN_OPTIONS = [
   { value: "subtilis", label: "Bacillus subtilis" },
   { value: "clausii", label: "Bacillus clausii" },
@@ -560,11 +561,12 @@ function Connected({ session, profile }) {
       const expiredIds = new Set(expired.map((r) => r.id));
       let mAfterTrash = m.filter((r) => !expiredIds.has(r.id));
 
+      // (Mốc đếm ngày: ngày NCV tích "Đã gửi mail" nếu có, không thì ngày vào Chờ SX.)
       // Chờ SX quá CHO_SX_RETENTION_DAYS ngày mà NCV chưa tự "Xác nhận đã pha" -> tự động chuyển
       // "Đã pha" (coi như chắc chắn đã pha xong trong lúc đó) — gộp theo đúng mẻ (mixPlanId+meSo) để
       // cả mẻ nhận CHUNG 1 mã mẻ tự động, giống hệt lúc NCV tự bấm xác nhận tay (xem ChoSXPanel).
       const choSxCutoff = Date.now() - CHO_SX_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-      const choSxExpired = mAfterTrash.filter((r) => r.choSX && !r.daPha && r.choSxAt && new Date(r.choSxAt).getTime() < choSxCutoff);
+      const choSxExpired = mAfterTrash.filter((r) => r.choSX && !r.daPha && (r.daGuiMailAt || r.choSxAt) && new Date(r.daGuiMailAt || r.choSxAt).getTime() < choSxCutoff);
       if (choSxExpired.length) {
         const byMe = {};
         choSxExpired.forEach((r) => { (byMe[`${r.mixPlanId}-${r.mixPlanMeSo}`] ||= []).push(r); });
@@ -740,6 +742,13 @@ function Connected({ session, profile }) {
       if (status === "cho-sx") choSxMeGroups.add(`${r.mixPlanId}-${r.mixPlanMeSo}`);
     }
     c["cho-sx"].meCount = choSxMeGroups.size;
+    const sentMe = new Set(), unsentMe = new Set();
+    for (const r of materials) {
+      if (statusOf(r).status !== "cho-sx") continue;
+      (r.daGuiMailAt ? sentMe : unsentMe).add(`${r.mixPlanId}-${r.mixPlanMeSo}`);
+    }
+    c["cho-sx"].unsentMe = unsentMe.size;
+    c["cho-sx"].sentMe = sentMe.size;
     return c;
   }, [materials]);
 
@@ -858,7 +867,11 @@ function Connected({ session, profile }) {
               })()}
               {/* Chờ SX nằm trong mục "Pha chế", không có bộ lọc theo chủng (subtilis/clausii) như
                   "Quản lý NL" — mỗi mẻ vốn đã gộp cả 2 chủng, lọc riêng từng chủng sẽ hiện mẻ thiếu. */}
-              {tab === "cho-sx" && <ChoSXPanel choSxMaterials={materials.filter((r) => statusOf(r).status === "cho-sx")} allMaterials={materials} products={products} actorId={actorId} setNote={setNote} onConfirmed={goToProductionHistory} canEdit={canEditProduction} />}
+              {(tab === "cho-sx" || tab === "cho-sx-da-gui") && (
+                <ChoSXPanel key={tab} sent={tab === "cho-sx-da-gui"}
+                  choSxMaterials={materials.filter((r) => statusOf(r).status === "cho-sx" && !!r.daGuiMailAt === (tab === "cho-sx-da-gui"))}
+                  allMaterials={materials} products={products} actorId={actorId} setNote={setNote} onConfirmed={goToProductionHistory} canEdit={canEditProduction} />
+              )}
               {tab === "pha" && <MixPanel materials={materials} products={products} onConfirm={confirmMix} canEdit={canEditProduction} />}
               {tab === "ke-hoach" && <MixPlanPanel materials={materials} products={products} actorId={actorId} setNote={setNote} reload={reload} canEdit={canEditProduction} canPreview={canPreviewPlan} role={profile.role} userLabel={profile?.fullName || identityLabel(session.user)} />}
               {tab === "sp" && <ProductPanel products={products} setProducts={setProducts} setNote={setNote} isAdmin={isAdmin} canEdit={canEditProduction} />}
@@ -887,7 +900,7 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, 
   const [spOpen, setSpOpen] = useState(false);
   const [lenMenOpen, setLenMenOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState({});
-  const isPhaTab = tab === "pha" || tab === "ke-hoach" || tab === "cho-sx";
+  const isPhaTab = tab === "pha" || tab === "ke-hoach" || tab === "cho-sx" || tab === "cho-sx-da-gui";
   const isNlTab = NL_TABS.some((t) => t.key === tab) || tab === "cho-xoa";
   const isSpTab = tab === "sp" || tab === "sp-history";
   const isLenMenTab = LENMEN_TABS.some((t) => t.key === tab);
@@ -931,15 +944,18 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, 
               style={tab === "ke-hoach" ? { color: ACTIVE_TEXT } : undefined}>
               <span className="flex-1 text-left">Pha chế SX</span>
             </button>
-            <button onClick={() => setTab("cho-sx")}
-              className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === "cho-sx" ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
-              style={tab === "cho-sx" ? { color: ACTIVE_TEXT } : undefined}>
-              <span className="flex-1 text-left">Chờ SX</span>
-              {counts["cho-sx"].meCount > 0 && (
-                <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-white/15"
-                  style={tab === "cho-sx" ? { backgroundColor: `${ACTIVE_TEXT}1a`, color: ACTIVE_TEXT } : undefined}>{counts["cho-sx"].meCount}</span>
-              )}
-            </button>
+            <div className="pl-8 pr-3 pt-2 pb-0.5 text-[11px] uppercase tracking-wide text-white/50">Chờ SX</div>
+            {[["cho-sx", "Chưa gửi mail", counts["cho-sx"].unsentMe], ["cho-sx-da-gui", "Đã gửi mail", counts["cho-sx"].sentMe]].map(([key, label, n]) => (
+              <button key={key} onClick={() => setTab(key)}
+                className={`w-full flex items-center gap-2 pl-11 pr-3 py-1.5 text-[13px] transition rounded ${tab === key ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
+                style={tab === key ? { color: ACTIVE_TEXT } : undefined}>
+                <span className="flex-1 text-left">{label}</span>
+                {n > 0 && (
+                  <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-white/15"
+                    style={tab === key ? { backgroundColor: `${ACTIVE_TEXT}1a`, color: ACTIVE_TEXT } : undefined}>{n}</span>
+                )}
+              </button>
+            ))}
           </div>
         )}
 
@@ -1090,7 +1106,8 @@ function Breadcrumb({ tab, focusMaSP, products }) {
     : tab === "cho-xoa" ? ["Trang chủ", "Quản lý NL", "Chờ pha", "Thùng rác"]
     : tab === "pha" ? ["Trang chủ", "Pha chế NCV"]
     : tab === "ke-hoach" ? ["Trang chủ", "Pha chế SX"]
-    : tab === "cho-sx" ? ["Trang chủ", "Pha chế", "Chờ SX"]
+    : tab === "cho-sx" ? ["Trang chủ", "Pha chế", "Chờ SX", "Chưa gửi mail"]
+    : tab === "cho-sx-da-gui" ? ["Trang chủ", "Pha chế", "Chờ SX", "Đã gửi mail"]
     : tab === "sp" ? ["Trang chủ", "Sản phẩm", "Danh mục"]
     : tab === "sp-history" ? (focusedProduct
         ? ["Trang chủ", "Sản phẩm", "Lịch sử pha chế", `${focusedProduct.maSP} · ${focusedProduct.tenSP}`]
@@ -2218,7 +2235,7 @@ async function revertChoSXGroup(rows, allMaterials, actorId) {
 /** Tab "Chờ SX" — NL đã được 1 kế hoạch mẻ pha DUYỆT (xem applyPlanApprovalToMaterials), nhóm theo
  * đúng mẻ (mixPlanId + mixPlanMeSo) vì mỗi mẻ được xác nhận "Đã pha" RIÊNG (không phải cả kế hoạch
  * cùng lúc — có mẻ pha trước, mẻ pha sau, cách nhau nhiều ngày là bình thường). */
-function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, onConfirmed, canEdit }) {
+function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, onConfirmed, canEdit, sent = false }) {
   // Nhóm 2 cấp: nhịp sản xuất (mixPlanId) -> từng mẻ (meSo) bên trong. "Xác nhận đã pha"/"Bỏ mẻ"
   // vẫn thao tác theo TỪNG MẺ (mỗi mẻ pha ở 1 thời điểm khác nhau), nhưng "Tạo thông tin gửi mail"
   // gộp TẤT CẢ mẻ còn ở Chờ SX của CÙNG 1 nhịp sản xuất vào 1 bảng duy nhất — đúng như email thực tế
@@ -2300,6 +2317,22 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
   // Chỉ tự nhảy sang "Lịch sử pha chế" khi cả loạt cùng 1 sản phẩm (nhảy tới đúng SP nào cũng được
   // nếu lẫn nhiều SP khác nhau sẽ gây hiểu lầm là chỉ xác nhận đúng SP đó) — lẫn nhiều SP thì chỉ
   // báo note, NCV tự vào Lịch sử pha chế xem nếu cần.
+  // Tích các mẻ (từng mẻ hoặc "Chọn tất cả") rồi chuyển qua lại giữa 2 nhánh Chưa gửi mail / Đã gửi mail.
+  // Mốc 30 ngày tự chuyển Đã pha tính từ lúc đánh dấu đã gửi mail.
+  const markMailSelected = async (value) => {
+    const items = [...selectedKeys].map((key) => keyedRows[key]).filter(Boolean);
+    if (!items.length) return;
+    setBusyKey("__mail__");
+    try {
+      await confirmMixBatch(items.flat().map((r) => r.id), { daGuiMailAt: value ? new Date().toISOString() : null }, actorId);
+      setSelectedKeys(new Set());
+      setNote(value
+        ? `Đã chuyển ${items.length} mẻ sang "Đã gửi mail" — còn ${CHO_SX_RETENTION_DAYS} ngày sẽ tự chuyển sang Đã pha.`
+        : `Đã đưa ${items.length} mẻ về "Chưa gửi mail".`);
+    } catch (err) { setNote(`Lỗi đánh dấu gửi mail: ${err.message}`); }
+    finally { setBusyKey(null); }
+  };
+
   const confirmSelected = async () => {
     const items = [...selectedKeys].map((key) => keyedRows[key]).filter(Boolean);
     if (!items.length) return;
@@ -2350,13 +2383,13 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
   };
 
   if (!groups.length) {
-    return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Chưa có NL nào đang chờ SX — NL sẽ tự chuyển sang đây sau khi 1 kế hoạch mẻ pha ở tab "Pha chế SX" được DUYỆT.</div>;
+    return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">{sent ? "Chưa có mẻ nào ở nhánh Đã gửi mail — tích mẻ ở nhánh Chưa gửi mail rồi bấm \"Đã gửi mail\" để chuyển sang đây. " : ""}Chưa có NL nào đang chờ SX — NL sẽ tự chuyển sang đây sau khi 1 kế hoạch mẻ pha ở tab "Pha chế SX" được DUYỆT.</div>;
   }
 
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500 flex items-center gap-1.5"><Factory className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Tích ô "Đã pha xong" ở (các) mẻ đã pha thật rồi bấm "Xác nhận đã pha" bên dưới (tích được nhiều mẻ, xác nhận 1 lần); nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha" — hoặc bấm "Bỏ tất cả mẻ" ở đầu mỗi nhịp sản xuất nếu cần bỏ nguyên cả nhịp cùng lúc.</p>
+        NL ở đây đã được lên kế hoạch pha chế và DUYỆT — không còn tính vào kế hoạch nào khác nữa. Tích ô vuông đầu mỗi mẻ (hoặc "Chọn tất cả") rồi bấm "Đã gửi mail" hoặc "Xác nhận đã pha" ở thanh phía trên (chọn được nhiều mẻ, bấm 1 lần); nếu quên, hệ thống tự chuyển "Đã pha" sau {CHO_SX_RETENTION_DAYS} ngày. Không pha mẻ này nữa thì bấm dấu <X className="w-3 h-3 inline" /> để trả NL về "Chờ pha" — hoặc bấm "Bỏ tất cả mẻ" ở đầu mỗi nhịp sản xuất nếu cần bỏ nguyên cả nhịp cùng lúc.</p>
       {canEdit && allKeys.length > 0 && (
         <div className="sticky z-10 flex items-center gap-3 px-4 py-2 bg-white border border-slate-200 rounded-lg shadow-sm"
           style={{ top: "var(--topbar-h, 76px)" }}>
@@ -2364,8 +2397,13 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
             <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} className="accent-emerald-600 w-4 h-4" />
             Chọn tất cả ({allKeys.length} mẻ)
           </label>
+          <button onClick={() => markMailSelected(!sent)} disabled={selectedKeys.size === 0 || busyKey != null}
+            title={sent ? "Đưa các mẻ đã tích về nhánh Chưa gửi mail" : `Chuyển các mẻ đã tích sang nhánh Đã gửi mail (tự chuyển Đã pha sau ${CHO_SX_RETENTION_DAYS} ngày)`}
+            className="ml-auto flex items-center gap-1.5 border border-sky-300 text-sky-700 bg-white text-xs px-3 py-1.5 rounded-md hover:bg-sky-50 disabled:opacity-40">
+            <Mail className="w-3.5 h-3.5" /> {sent ? "Bỏ đã gửi mail" : "Đã gửi mail"} ({selectedKeys.size} mẻ)
+          </button>
           <button onClick={confirmSelected} disabled={selectedKeys.size === 0 || busyKey != null}
-            className="ml-auto flex items-center gap-1.5 bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
+            className="flex items-center gap-1.5 bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
             <CheckCircle2 className="w-3.5 h-3.5" /> Xác nhận đã pha ({selectedKeys.size} mẻ đã chọn)
           </button>
         </div>
@@ -2408,11 +2446,17 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
               const key = `${planId}-${meSo}`;
               const r0 = rows[0];
               const totalV = rows.reduce((s, r) => s + (r.vDich || 0), 0);
-              const daysLeft = r0.choSxAt ? CHO_SX_RETENTION_DAYS - Math.floor((Date.now() - new Date(r0.choSxAt).getTime()) / (24 * 60 * 60 * 1000)) : null;
+              const countFrom = r0.daGuiMailAt || r0.choSxAt;
+              const daysLeft = countFrom ? CHO_SX_RETENTION_DAYS - Math.floor((Date.now() - new Date(countFrom).getTime()) / (24 * 60 * 60 * 1000)) : null;
               const meLike = planLike ? { ...planLike, batches: planLike.batches.filter((b) => b.meSo === meSo) } : null;
               return (
                 <div key={key} className="space-y-0">
                   <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 bg-slate-50 border border-b-0 border-slate-200 rounded-t-lg">
+                    {canEdit && (
+                      <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelect(key)}
+                        disabled={busyKey != null} title="Chọn mẻ này (để bấm Đã gửi mail / Xác nhận đã pha ở thanh phía trên)"
+                        className="accent-emerald-600 w-4 h-4 shrink-0" />
+                    )}
                     <span className="font-semibold text-sm">{r0.phaProduct || "?"} · Mẻ {r0.mixPlanMeSo}</span>
                     <span className="text-xs text-slate-500">Tổng {fmt(totalV, 2)} L · {rows.length} chai</span>
                     {daysLeft != null && (
@@ -2422,13 +2466,8 @@ function ChoSXPanel({ choSxMaterials, allMaterials, products, actorId, setNote, 
                     )}
                     {canEdit && (
                       <>
-                        <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
-                          <input type="checkbox" checked={selectedKeys.has(key)} onChange={() => toggleSelect(key)}
-                            disabled={busyKey != null} className="accent-emerald-600 w-4 h-4" />
-                          Đã pha xong
-                        </label>
                         <button onClick={() => cancelMe(key, rows)} disabled={busyKey != null} title="Bỏ mẻ này, trả NL về Chờ pha"
-                          className="flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 disabled:opacity-40">
+                          className="ml-auto flex items-center gap-1 text-xs text-slate-400 hover:text-rose-600 border border-slate-200 hover:border-rose-200 rounded-md px-2 py-1.5 disabled:opacity-40">
                           <X className="w-3.5 h-3.5" />
                         </button>
                       </>
@@ -2468,6 +2507,7 @@ const XU_LY_SAU_DONG_ONG_OPTIONS = ["Hấp 70°C/40 phút", "Không hấp"];
 const QUY_TRINH_KHAC_OPTIONS = ["Hấp trong tank 70°C/40 phút", "Không duy trì nhiệt trong tank"];
 const CHOT_HUONG_OPTIONS = ["Hoàn thiện luôn", "Chờ KQKN"];
 const KHAC_SENTINEL = "__khac__";
+const VE_SINH_TIET_TRUNG_LABEL = "Vệ sinh — tiệt trùng hệ thống";
 
 function tenNguyenLieuFor(chung, sp) {
   const strain = chung || (sp?.pool?.startsWith("clausii") ? "clausii" : "subtilis");
@@ -2528,19 +2568,26 @@ function RowProcessSelect({ options, value, onChange }) {
  * gửi mail cho các bộ phận. Số liệu (CFU, thể tích, cỡ lô...) lấy lại Y HỆT planBatchRows đang dùng ở
  * "Bảng mẻ pha" — không tính toán/suy diễn gì mới ở đây. */
 function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
-  const rows = useMemo(() => planBatchRows(planLike, sp, isTwo), [planLike, sp, isTwo]);
+  const rows = useMemo(
+    () => planBatchRows(planLike, sp, isTwo, {}, Object.fromEntries((planLike.sterilizeBefore || []).map((m) => [m, true]))),
+    [planLike, sp, isTwo],
+  );
   // Gom rows (1 dòng/lô, xem planBatchRows) lại theo TỪNG MẺ để: (a) hiện rowSpan cho các cột dùng
   // chung cả mẻ (Mẻ pha/Tổng V/Mã hóa mẻ/Chốt hướng) — đỡ rối khi 1 mẻ có nhiều lô, và (b) tô màu
   // xen kẽ đậm/nhạt theo TỪNG MẺ (không phải theo từng lô) để dễ phân biệt ranh giới các mẻ.
   const batchGroups = useMemo(() => {
     const gs = [];
     rows.forEach((r) => {
-      if (r.meSo != null) gs.push({ meSo: r.meSo, tongTheTich: r.tongTheTich, items: [r] });
+      if (r.meSo != null) gs.push({ meSo: r.meSo, tongTheTich: r.tongTheTich, savedSterilize: r.needSterilizeBefore, items: [r] });
       else gs[gs.length - 1].items.push(r);
     });
     return gs;
   }, [rows]);
 
+  // Mốc "vệ sinh — tiệt trùng hệ thống" trước từng mẻ: mặc định theo kế hoạch đã lưu, NCV bật/tắt lại
+  // ngay tại đây được (kế hoạch duyệt từ trước khi có lưu mốc thì không có sẵn mốc nào).
+  const [sterilizeByMe, setSterilizeByMe] = useState({});
+  const sterilizeBeforeFor = (g, gi) => gi > 0 && (sterilizeByMe[g.meSo] ?? g.savedSterilize);
   const [xuLyDauVao, setXuLyDauVao] = useState("Không");
   const [xuLySauPha, setXuLySauPha] = useState("Không");
   const [sauDongOng, setSauDongOng] = useState(XU_LY_SAU_DONG_ONG_OPTIONS[0]);
@@ -2551,7 +2598,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
   // đúng số mẻ ĐẦU TIÊN ("từ mẻ"), các mẻ sau trong bảng tự tăng dần (xem deriveMaHoaMe) — "đến mẻ"
   // KHÔNG cần gõ tay nữa, tự cộng = từ mẻ + số mẻ trong bảng - 1 (xem denMe bên dưới). Mẻ nào cần mã
   // khác quy tắc tự tăng thì sửa riêng ngay trong bảng (maHoaMeByMe), giống Chốt hướng.
-  const [maHoaLo, setMaHoaLo] = useState("");
+  const [maHoaLo, setMaHoaLo] = useState(sp.maHoaThanOng || ""); // cố định theo SP ở tab Sản phẩm, vẫn sửa được
   const [tuMe, setTuMe] = useState("");
   const [maHoaMeByMe, setMaHoaMeByMe] = useState({});
   // Chốt hướng: có 1 ô mặc định áp dụng cho MỌI mẻ (giống 4 ô xử lý BTP ở trên), sửa riêng ngay
@@ -2603,6 +2650,10 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
       const maHoaMe = maHoaMeFor(g.meSo, gi);
       const chotHuong = chotHuongFinalFor(g.meSo);
       const meNo = meDisplayNo(gi);
+      if (sterilizeBeforeFor(g, gi)) {
+        bodyHtmlRows.push(`<tr><td colspan="${headers.length}" align="center"><b>${VE_SINH_TIET_TRUNG_LABEL}</b></td></tr>`);
+        textLines.push([VE_SINH_TIET_TRUNG_LABEL, ...Array(headers.length - 1).fill("")].join("\t"));
+      }
       g.items.forEach((r, ri) => {
         const common = [
           tenNguyenLieuFor(r.chung, sp), r.maLo, sci(r.E), fmt(r.vRaw, 2), sci(r.d), String(sp.tubeMl),
@@ -2684,7 +2735,22 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
               const rowBg = gi % 2 === 1 ? "bg-indigo-100/70" : "bg-white";
               const maHoaMe = maHoaMeFor(g.meSo, gi);
               return g.items.map((r, ri) => (
-                <tr key={r.key} className={`border-b border-slate-200 ${rowBg} ${ri === 0 && gi > 0 ? "border-t-2 border-t-slate-400" : ""}`}>
+                <React.Fragment key={r.key}>
+                {ri === 0 && gi > 0 && (sterilizeBeforeFor(g, gi) ? (
+                  <tr className="bg-amber-50 border-t-2 border-t-slate-400">
+                    <td colSpan={headers.length} className="px-3 py-1.5 text-center text-amber-700 font-medium">
+                      🧼 {VE_SINH_TIET_TRUNG_LABEL}
+                      <button onClick={() => setSterilizeByMe((p) => ({ ...p, [g.meSo]: false }))} className="ml-2 text-[11px] underline text-amber-600 hover:text-amber-800">bỏ</button>
+                    </td>
+                  </tr>
+                ) : (
+                  <tr className="bg-slate-50 border-t-2 border-t-slate-400">
+                    <td colSpan={headers.length} className="px-3 py-0.5 text-center">
+                      <button onClick={() => setSterilizeByMe((p) => ({ ...p, [g.meSo]: true }))} className="text-[11px] underline text-slate-400 hover:text-slate-600">+ thêm dòng vệ sinh — tiệt trùng trước mẻ này</button>
+                    </td>
+                  </tr>
+                ))}
+                <tr className={`border-b border-slate-200 ${rowBg} ${ri === 0 && gi > 0 ? "border-t-2 border-t-slate-400" : ""}`}>
                   {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 font-medium align-top">{meDisplayNo(gi)}</td>}
                   {ri === 0 && <td rowSpan={g.items.length} className="px-2 py-1 align-top">{fmt(g.tongTheTich, 2)}</td>}
                   <td className="px-2 py-1">{tenNguyenLieuFor(r.chung, sp)}</td>
@@ -2743,6 +2809,7 @@ function MeMailExportForm({ planLike, sp, isTwo, setNote }) {
                     </td>
                   )}
                 </tr>
+                </React.Fragment>
               ));
             })}
           </tbody>
@@ -2954,6 +3021,9 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   // "Pha tròn chai NL" — chỉ áp dụng SP 1 thành phần (chốt NCV 2026-08-10): mỗi lô = đúng 1 mẻ
   // riêng, không ghép nhiều lô vào 1 mẻ (xem packWholeBottleBatches trong mixPlanner.js).
   const [wholeBottleOnly, setWholeBottleOnly] = useState(false);
+  // SP 2 thành phần (chốt NCV 2026-10-08): "tronChaiClausii" = chốt số chai clausii NGUYÊN VẸN gần N
+  // nhất (mặc định, không dư clausii); "tronMePha" = pha đủ đúng N, chấp nhận dư lại 1 chai clausii dở.
+  const [cheDo2TP, setCheDo2TP] = useState("tronChaiClausii");
   const [plan, setPlan] = useState(null);
   const [batchOverrides, setBatchOverrides] = useState({}); // { [meSo]: V (L) do NCV tự chọn nới trần mẻ đó }
   // { [meSo]: true|false } — NCV tự ép có/không cần tiệt trùng trước mẻ đó, ghi đè quy tắc tự động
@@ -3063,8 +3133,9 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       const clausiiLots = poolLots(subFirst ? sp.pool2 : sp.pool, sp.allowOtherLoai);
       const gSubtilis = subFirst ? G1 : G2;
       const gClausii = subFirst ? G2 : G1;
-      result = planTwoComponent({ subtilisLots, clausiiLots, product: { N, H: sp.tubeMl, gSubtilis, gClausii } });
+      result = planTwoComponent({ subtilisLots, clausiiLots, product: { N, H: sp.tubeMl, gSubtilis, gClausii }, mode: cheDo2TP });
       result._kind = "two";
+      result._mode = cheDo2TP;
       result._gSubtilis = gSubtilis;
       result._gClausii = gClausii;
       // Giữ lại pool gốc (có F thật của cả chai) để hiển thị bảng "còn tồn" theo từng lô.
@@ -3099,6 +3170,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       summary.gClausii = plan._gClausii;
       summary.dSubtilis = plan.dSubtilis;
       summary.dClausii = plan.dClausii;
+      summary.cheDo = plan._mode === "tronMePha" ? "tròn mẻ pha (pha đủ lượng, chấp nhận dư clausii)" : "tròn chai clausii (không dư clausii)";
       if (plan.subtilisShortfallLot) summary.subtilisShortfallLot = plan.subtilisShortfallLot;
       summary.batches = plan.batches.map((b) => ({
         meSo: b.meSo, tongTheTich: b.tongTheTich,
@@ -3137,11 +3209,18 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
     return { ...p, batches: p.batches.map((b) => (b.meSo in batchOverrides ? { ...b, tongTheTich: batchOverrides[b.meSo] } : b)) };
   };
 
+  // Mốc "vệ sinh — tiệt trùng hệ thống" NCV đã đánh dấu: lưu cùng kế hoạch (sterilizeBefore = các mẻ
+  // cần tiệt trùng TRƯỚC khi pha) để bảng gửi mail ở Chờ SX hiện lại đúng các dòng đó.
+  const withSterilize = (ketQua, batches, overrides) => ({
+    ...ketQua,
+    sterilizeBefore: batches.filter((b, bi) => computeSterilizeFlags(batches, overrides)[bi]).map((b) => b.meSo),
+  });
+
   const decide = async (trangThai) => {
     if (!plan) return;
     setSaving(true);
     try {
-      const saved = await saveMixPlanDecision({ maSP: sp.maSP, soOngMucTieu: plan._N, ketQua: applyOverrides(plan), trangThai, ghiChu, actorId });
+      const saved = await saveMixPlanDecision({ maSP: sp.maSP, soOngMucTieu: plan._N, ketQua: withSterilize(applyOverrides(plan), plan.batches, sterilizeOverrides), trangThai, ghiChu, actorId });
       if (trangThai === "duyet") {
         await applyPlanApprovalToMaterials({ batches: applyOverrides(plan).batches, isTwo: plan._kind === "two", maSP: sp.maSP, planId: saved.id, materials, actorId });
         await reload(); // không chỉ dựa vào realtime — đảm bảo tab "Chờ SX" thấy ngay NL vừa chuyển.
@@ -3164,7 +3243,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
     setEditBatches(structuredClone(row.ketQua.batches));
     setEditHistoryStack([]);
     setEditGhiChu("");
-    setEditSterilizeOverrides({});
+    setEditSterilizeOverrides(Object.fromEntries((row.ketQua.sterilizeBefore || []).map((m) => [m, true])));
   };
   const cancelEditPlan = () => {
     setEditingPlan(null);
@@ -3277,7 +3356,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
         const diffPct = cfu > 0 ? (Math.abs(cfu - totalOut) / cfu) * 100 : 0;
         extra = { ...extra, d, massBalance: { totalIn: cfu, totalOut, diffPct, pass: diffPct < 1 } };
       }
-      const newKetQua = { ...editingPlan.ketQua, batches: editBatches, ...extra };
+      const newKetQua = withSterilize({ ...editingPlan.ketQua, batches: editBatches, ...extra }, editBatches, editSterilizeOverrides);
       const saved = await saveEditedMixPlanDecision({ originalId: editingPlan.id, maSP: sp.maSP, soOngMucTieu: editingPlan.soOngMucTieu, ketQua: newKetQua, trangThai, ghiChu: editGhiChu, actorId });
       if (trangThai === "duyet") {
         await applyPlanApprovalToMaterials({ batches: editBatches, isTwo: editIsTwo, maSP: sp.maSP, planId: saved.id, materials, actorId });
@@ -3368,6 +3447,20 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
               </label>
               <input value={gInput2} onChange={(e) => setGInput2(e.target.value)} placeholder="vd 4e8"
                 className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
+            </div>
+          )}
+          {sp.pool2 && (
+            <div className="flex flex-col gap-1 text-sm text-slate-600 pb-1">
+              <label className="flex items-center gap-2" title="Chốt số chai clausii NGUYÊN VẸN cho sản lượng gần N nhất — không dư clausii, số ống có thể lệch N theo cỡ chai">
+                <input type="radio" name="cheDo2TP" checked={cheDo2TP === "tronChaiClausii"} onChange={() => setCheDo2TP("tronChaiClausii")}
+                  className="accent-emerald-600" />
+                Tròn chai clausii
+              </label>
+              <label className="flex items-center gap-2" title="Pha đủ đúng số ống cần — chấp nhận dư lại 1 chai clausii dùng dở, NL vẫn đong tròn 0.5L">
+                <input type="radio" name="cheDo2TP" checked={cheDo2TP === "tronMePha"} onChange={() => setCheDo2TP("tronMePha")}
+                  className="accent-emerald-600" />
+                Tròn mẻ pha (pha đủ lượng, chấp nhận dư clausii)
+              </label>
             </div>
           )}
           {!sp.pool2 && (
@@ -3941,6 +4034,57 @@ function BatchPlanTable({ plan, sp, isTwo, batchOverrides = {}, sterilizeOverrid
   );
 }
 
+/** Giải thích VÌ SAO kế hoạch ra đúng số ống T (so với mục tiêu N) — để NCV biết nên chỉnh gì (bổ sung NL,
+ * đổi số ống cần, đổi chế độ pha...). Chỉ dựa vào số liệu đã có trong plan, không tính lại thuật toán. */
+function explainTubeCount(plan, sp, isTwo) {
+  const N = plan._N, T = plan.T, H = sp.tubeMl;
+  const usage = computeLotUsageSummary(plan, isTwo);
+  const tubesOf = (rows, g) => rows.reduce((sum, r) => sum + (r.E * r.total * 1000) / (g * H), 0);
+  const diff = T - N;
+  const pct = (T / N) * 100;
+  const out = [];
+  out.push({ kind: "head", text: `Mục tiêu ${fmt(N, 0)} ống → kế hoạch ra ${fmt(T, 0)} ống (${fmt(pct, 1)}%, ${diff >= 0 ? "dư" : "thiếu"} ${fmt(Math.abs(diff), 0)} ống).` });
+
+  if (!isTwo) {
+    const G = plan._G;
+    const pool = plan._lotsPool || [];
+    const used = usage.filter((r) => r.total > 0);
+    const totalCfu = used.reduce((sum, r) => sum + r.E * r.total * 1000, 0);
+    out.push({ text: `Công thức: số ống = tổng bào tử NL đã dùng ÷ (hàm lượng đích × thể tích ống) = ${sci(totalCfu)} CFU ÷ (${sci(G)} × ${H} ml) = ${fmt(T, 0)} ống. Mật độ luôn đúng bằng hàm lượng đích, nên số ống chỉ phụ thuộc lượng bào tử NL dùng vào.` });
+    out.push({ text: `NL khả dụng trong Chờ pha: ${pool.length} chai. Kế hoạch dùng ${used.length} chai, xếp từ cũ đến mới (FIFO), dừng khi tổng bào tử đủ cho ${fmt(N, 0)} ống.` });
+    const poolOng = pool.reduce((sum, l) => sum + (l.E * l.F * 1000) / (G * H), 0);
+    if (used.length >= pool.length && T < N) {
+      const missCfu = (N - T) * G * H;
+      const avgE = pool.length ? pool.reduce((sum, l) => sum + l.E * l.F, 0) / pool.reduce((sum, l) => sum + l.F, 0) : 0;
+      out.push({ kind: "reason", text: `Lý do thiếu ống: đã dùng HẾT ${pool.length} chai khả dụng mà tổng bào tử chỉ đủ ${fmt(poolOng, 0)} ống. Muốn đủ ${fmt(N, 0)} ống cần thêm khoảng ${sci(missCfu)} CFU${avgE > 0 ? ` (~${fmt(missCfu / 1000 / avgE, 1)} lít NL cùng loại)` : ""}.` });
+      out.push({ kind: "tip", text: `Có thể: (1) chờ/bổ sung NL đã qua KQKN vào Chờ pha rồi tính lại, (2) hạ số ống cần xuống ≤ ${fmt(T, 0)}, (3) nếu sản phẩm cho phép "Dùng loại khác dự phòng" thì bật ở tab Sản phẩm để lấy thêm NL, (4) chấp nhận ${fmt(T, 0)} ống (còn trên mức tối thiểu 90%).` });
+    } else if (T >= N) {
+      const last = used[used.length - 1];
+      const lastOng = last ? (last.E * last.total * 1000) / (G * H) : 0;
+      out.push({ kind: "reason", text: `Lý do ${diff > 0 ? "dư" : "đủ"} ống: NL cộng dồn theo FIFO tới chai ${last?.maLo || "cuối"} thì mới chạm ${fmt(N, 0)} ống; chai này góp ~${fmt(lastOng, 0)} ống và được dùng hết (không chia nhỏ chai).` });
+      if (diff > 0 && last) out.push({ kind: "tip", text: `Nếu bỏ chai ${last.maLo}: còn ${fmt(T - lastOng, 0)} ống (thiếu ${fmt(N - (T - lastOng), 0)} so với mục tiêu). Muốn khớp hơn có thể hạ số ống cần, hoặc tích "Pha tròn chai NL" nếu muốn chia mẻ theo chai nguyên.` });
+    } else {
+      out.push({ kind: "reason", text: `Sản lượng thấp hơn mục tiêu vì kho không còn thêm chai khả dụng nào.` });
+    }
+    return out;
+  }
+
+  const gS = plan._gSubtilis, gC = plan._gClausii;
+  const rowsS = usage.filter((r) => r.chung === "subtilis"), rowsC = usage.filter((r) => r.chung === "clausii");
+  const ongS = tubesOf(rowsS, gS), ongC = tubesOf(rowsC, gC);
+  out.push({ text: `Mỗi mẻ cần ĐỒNG THỜI đủ 2 chủng ở đúng hàm lượng đích, nên sản lượng bị giới hạn bởi chủng ít hơn. NL đã dùng đủ cho: clausii ${fmt(ongC, 0)} ống (${rowsC.length} chai), subtilis ${fmt(ongS, 0)} ống (${rowsS.length} chai). Tổng thể tích pha ${fmt(plan.totalV, 1)} L → ${fmt(T, 0)} ống.` });
+  if (plan._mode === "tronMePha") {
+    out.push({ kind: "reason", text: `Chế độ "Tròn mẻ pha": chọn chai clausii bất kỳ sao cho khớp ${fmt(N, 0)} ống nhất, chấp nhận dư tối đa 1 chai clausii dở; số lít NL được đong theo bội số 0,5 L.` });
+  } else {
+    out.push({ kind: "reason", text: `Chế độ "Tròn chai clausii": chai clausii dùng NGUYÊN VẸN (không chai nào dở), nên thuật toán nhặt tổ hợp chai clausii cho sản lượng gần ${fmt(N, 0)} ống nhất — ra ${fmt(ongC, 0)} ống; sau đó subtilis được chọn khớp theo lượng này (±3%) hoặc lấy từ cũ đến mới.` });
+  }
+  if (plan.subtilisShortfallLot) out.push({ kind: "reason", text: `Kho subtilis không đủ để dùng thêm chai clausii ${plan.subtilisShortfallLot}, nên sản lượng dừng ở mức hiện tại.` });
+  if (T < N * 0.97 || T > N * 1.03) {
+    out.push({ kind: "tip", text: `Chênh lệch ${fmt(Math.abs(diff), 0)} ống là do cỡ chai/kho NL hiện có. Có thể: đổi số ống cần cho khớp cỡ chai, chuyển chế độ pha (Tròn mẻ pha ↔ Tròn chai clausii), hoặc bổ sung NL vào Chờ pha rồi tính lại.` });
+  }
+  return out;
+}
+
 function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, sterilizeOverrides = {}, onSterilizeToggle, onReorder }) {
   const isTwo = plan._kind === "two";
 
@@ -3976,10 +4120,9 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
   plan.batches.forEach((b) => {
     if (b.tongTheTich >= TANK_MAX_L * 0.95) warnings.push(`Mẻ ${b.meSo} gần chạm trần tank (${fmt(b.tongTheTich, 1)}L).`);
   });
-  // Cảnh báo MẬT ĐỘ TỪNG MẺ riêng (khác cảnh báo mật độ TRUNG BÌNH CẢ NHỊP ở trên) — 1 mẻ đơn lẻ có
-  // thể dư mật độ rất nặng (vd mẻ đóng cuối bị chặn trần T, phải dồn hết chai đang dở mà không thêm
-  // nước — xem MAX_CLOSING_OVERSHOOT) trong khi mật độ TRUNG BÌNH cả nhịp vẫn trông bình thường (bị
-  // các mẻ khác pha loãng ra trong số liệu tổng) — cần cảnh báo riêng để NCV không bỏ sót đúng mẻ đó.
+  // Cảnh báo MẬT ĐỘ TỪNG MẺ riêng (khác cảnh báo mật độ TRUNG BÌNH CẢ NHỊP ở trên) — thuật toán hiện
+  // tại không còn tạo ra mẻ dư mật độ nặng, nhưng kế hoạch SỬA TAY thì vẫn có thể — 1 mẻ lệch nặng có
+  // thể bị che bởi mật độ trung bình cả nhịp, nên vẫn kiểm riêng từng mẻ.
   if (isTwo) {
     plan.batches.forEach((b) => {
       const cfuA = b.subtilis.reduce((s, x) => s + x.E * x.theTichRaw, 0) * 1000;
@@ -3990,7 +4133,7 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
       const wB = dB > 0 ? (dB / plan._gClausii - 1) * 100 : 0;
       const wMax = Math.max(wA, wB);
       if (wMax > 20) {
-        warnings.push(`Mẻ ${b.meSo} mật độ dư RẤT NHIỀU so với đích (subtilis +${fmt(wA, 0)}%, clausii +${fmt(wB, 0)}%) — do phải dồn hết 1 chai đang dở vào mà không thêm nước (chạm trần sản lượng). Kiểm tra kỹ trước khi pha, cân nhắc có nên tách riêng phần NL này hay điều chỉnh đơn.`);
+        warnings.push(`Mẻ ${b.meSo} mật độ dư RẤT NHIỀU so với đích (subtilis +${fmt(wA, 0)}%, clausii +${fmt(wB, 0)}%) — kiểm tra lại lượng NL/nước của mẻ này trước khi pha.`);
       }
     });
   }
@@ -4020,12 +4163,18 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
     }
   }
   if (plan.subtilisShortfallLot) {
-    warnings.push(`Kho subtilis KHÔNG đủ để dùng hết lô clausii "${plan.subtilisShortfallLot}" mà không để dở dang — kế hoạch đã CHỦ ĐỘNG dừng sớm hơn mục tiêu ${fmt(plan._N, 0)} ống (chốt cứng: clausii không bao giờ được để dở). Bổ sung subtilis nếu muốn đạt đủ số ống, hoặc pha theo kế hoạch hụt này.`);
+    warnings.push(`Kho subtilis KHÔNG đủ để dùng thêm chai clausii "${plan.subtilisShortfallLot}" (chai này lẽ ra đưa sản lượng sát mục tiêu ${fmt(plan._N, 0)} ống hơn) — kế hoạch dừng ở số chai clausii hiện tại, không mở dở chai đó (clausii không bao giờ được để dở). Bổ sung subtilis nếu muốn sát mục tiêu hơn, hoặc pha theo kế hoạch này.`);
   }
   const selfMixedBatches = plan.batches.filter((b) => b.tronLoSanXuat).map((b) => b.meSo);
-  if (selfMixedBatches.length) warnings.push(`Mẻ ${selfMixedBatches.join(", ")} tự thân đã trộn NL từ ≥2 lô sản xuất khác nhau trong cùng 1 tank (mẻ trước quá vơi).`);
-  if (plan.T > 1.05 * plan._N) {
-    warnings.push(`Sản lượng dư ${fmt((plan.T / plan._N - 1) * 100, 0)}% so với mục tiêu (${fmt(plan._N, 0)} ống) — do kho các chủng lệch tỉ lệ nên phải dùng hết sạch NL đã chạm tới (đặc biệt clausii, không để dư), thể tích không vượt quá +${Math.round((MAX_CLOSING_OVERSHOOT - 1) * 100)}%. Xem kỹ bảng "NL sử dụng theo từng lô" bên dưới rồi quyết định có pha theo kế hoạch này hay điều chỉnh lại đơn/kho trước.`);
+  if (selfMixedBatches.length) warnings.push(`Mẻ ${selfMixedBatches.join(", ")} dùng NL từ ≥2 lô sản xuất khác nhau của cùng 1 chủng trong cùng 1 tank.`);
+  const tronChaiClausii = isTwo && plan._mode !== "tronMePha";
+  if (tronChaiClausii && plan.T > 1.05 * plan._N) {
+    warnings.push(`Sản lượng dư ${fmt((plan.T / plan._N - 1) * 100, 0)}% so với mục tiêu (${fmt(plan._N, 0)} ống) — do cỡ chai clausii: đây là số chai clausii NGUYÊN VẸN cho sản lượng gần mục tiêu nhất (bớt 1 chai sẽ hụt nhiều hơn mức dư hiện tại; clausii không được dùng dở). Xem kỹ rồi quyết định pha theo kế hoạch này hay điều chỉnh lại đơn.`);
+  } else if (plan.T > 1.05 * plan._N) {
+    warnings.push(`Sản lượng dư ${fmt((plan.T / plan._N - 1) * 100, 0)}% so với mục tiêu (${fmt(plan._N, 0)} ống).`);
+  }
+  if (tronChaiClausii && plan.T < TUBE_TOL_LOW * plan._N && !plan.subtilisShortfallLot) {
+    warnings.push(`Sản lượng chỉ đạt ${fmt((plan.T / plan._N) * 100, 0)}% mục tiêu (${fmt(plan._N, 0)} ống) — do cỡ chai clausii: đây là số chai clausii NGUYÊN VẸN cho sản lượng gần mục tiêu nhất (thêm 1 chai sẽ dư nhiều hơn mức hụt hiện tại; clausii không được dùng dở). Cân nhắc điều chỉnh đơn cho khớp cỡ chai.`);
   }
 
   return (
@@ -4044,6 +4193,16 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
             <Stat label="Mật độ pha thực đạt" value={sci(plan.d)} sub={approxEq(plan.d, plan._G) ? `khớp mật độ đích (${sci(plan._G)})` : `đích ${sci(plan._G)} — dư ${fmt((plan.d / plan._G - 1) * 100, 1)}%`} />
           )}
         </div>
+        <details className="mt-3 border-t border-slate-100 pt-3 text-xs" open>
+          <summary className="cursor-pointer font-medium text-slate-600 select-none">Vì sao ra số ống này?</summary>
+          <ul className="mt-2 space-y-1.5">
+            {explainTubeCount(plan, sp, isTwo).map((l, i) => (
+              <li key={i} className={l.kind === "head" ? "font-medium text-slate-700" : l.kind === "reason" ? "text-amber-800 bg-amber-50 rounded px-2 py-1" : l.kind === "tip" ? "text-sky-800 bg-sky-50 rounded px-2 py-1" : "text-slate-500"}>
+                {l.kind === "tip" ? "💡 " : ""}{l.text}
+              </li>
+            ))}
+          </ul>
+        </details>
       </div>
 
       <BatchPlanTable plan={plan} sp={sp} isTwo={isTwo} batchOverrides={batchOverrides} sterilizeOverrides={sterilizeOverrides}
@@ -4294,7 +4453,7 @@ function PassRow({ label, pass, detail }) {
 
 /* ---------------- Thêm sản phẩm mới ---------------- */
 function AddProductForm({ onAdd }) {
-  const empty = { maSP: "", tenSP: "", pool: "subtilis", thanhPhan: "", hamLuong: "", tubeMl: "", soOngNhip: "", ncv: "", pool2: "", thanhPhan2: "", hamLuong2: "" };
+  const empty = { maSP: "", tenSP: "", pool: "subtilis", thanhPhan: "", hamLuong: "", tubeMl: "", soOngNhip: "", ncv: "", maHoaThanOng: "", pool2: "", thanhPhan2: "", hamLuong2: "" };
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(empty);
   const [twoParts, setTwoParts] = useState(false);
@@ -4397,6 +4556,11 @@ function AddProductForm({ onAdd }) {
         <label className="text-xs text-slate-500">Ống/nhịp</label>
         <input value={draft.soOngNhip} onChange={(e) => setDraft({ ...draft, soOngNhip: e.target.value })}
           className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-20" />
+      </div>
+      <div>
+        <label className="text-xs text-slate-500">Mã hóa thân ống</label>
+        <input value={draft.maHoaThanOng} onChange={(e) => setDraft({ ...draft, maHoaThanOng: e.target.value })} placeholder="vd 32126I"
+          className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-28" />
       </div>
       <div>
         <label className="text-xs text-slate-500">NCV</label>
@@ -4661,7 +4825,7 @@ function ProductPanel({ products, setProducts, setNote, isAdmin, canEdit }) {
       <div className="overflow-x-auto">
         <table className="w-full text-xs whitespace-nowrap">
           <thead className="bg-slate-50 text-slate-400 text-left">
-            <tr>{[...(isAdmin ? [""] : []), "Mã SP","Tên","Thành phần","Nguồn NL","Hàm lượng (cfu/ml)","Dùng loại khác dự phòng","Ống (ml)","Ống/nhịp","NCV",""].map((h,i)=><th key={i} className="px-3 py-2 font-medium">{h}</th>)}</tr>
+            <tr>{[...(isAdmin ? [""] : []), "Mã SP","Tên","Thành phần","Nguồn NL","Hàm lượng (cfu/ml)","Dùng loại khác dự phòng","Ống (ml)","Ống/nhịp","Mã hóa thân ống","NCV",""].map((h,i)=><th key={i} className="px-3 py-2 font-medium">{h}</th>)}</tr>
           </thead>
           <tbody>
             {products.map((p, i) => {
@@ -4702,6 +4866,7 @@ function ProductPanel({ products, setProducts, setNote, isAdmin, canEdit }) {
                     <td rowSpan={rows} className="px-2 py-1 text-center align-top">{allowOtherCell}</td>
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.tubeMl} on={(v) => edit(i, "tubeMl", v)} w="w-14" disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.soOngNhip} on={(v) => edit(i, "soOngNhip", v)} w="w-20" disabled={!canEdit} /></td>
+                    <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.maHoaThanOng} on={(v) => edit(i, "maHoaThanOng", v)} w="w-24" disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.ncv} on={(v) => edit(i, "ncv", v)} w="w-20" disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-3 py-1.5 text-right align-top">
                       {canEdit && (
