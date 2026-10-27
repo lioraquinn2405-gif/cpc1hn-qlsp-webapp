@@ -19,7 +19,7 @@ const PRODUCT_FIELDS = [
   ["thanhPhan", "thanh_phan"], ["hamLuong", "ham_luong"],
   ["tubeMl", "tube_ml"], ["soOngNhip", "so_ong_nhip"], ["ncv", "ncv"],
   ["pool2", "pool2"], ["hamLuong2", "ham_luong2"], ["thanhPhan2", "thanh_phan2"], ["allowOtherLoai", "allow_other_loai"],
-  ["sortOrder", "sort_order"], ["maHoaThanOng", "ma_hoa_than_ong"],
+  ["sortOrder", "sort_order"], ["maHoaThanOng", "ma_hoa_than_ong"], ["quyTacMe", "quy_tac_me"],
 ];
 
 const toCamel = (fields) => (row) =>
@@ -34,7 +34,7 @@ const productSnakeKey = toSnakeKey(PRODUCT_FIELDS);
 // ma_hoa_than_ong (migration_products_ma_hoa_than_ong.sql) chỉ gửi khi có giá trị — để thêm SP vẫn chạy
 // được ở DB chưa chạy migration.
 const productToSnake = (p) =>
-  Object.fromEntries(PRODUCT_FIELDS.filter(([camel]) => camel !== "maHoaThanOng" || p[camel]).map(([camel, snake]) => [snake, p[camel]]));
+  Object.fromEntries(PRODUCT_FIELDS.filter(([camel]) => (camel !== "maHoaThanOng" && camel !== "quyTacMe") || p[camel]).map(([camel, snake]) => [snake, p[camel]]));
 
 const PAGE_SIZE = 1000;
 

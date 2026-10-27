@@ -17,12 +17,12 @@ import {
 } from "./lib/materialsApi.js";
 import { fetchProfile, fetchProfiles, updateProfile, setUserEmail, requestEmailChange, signUp, adminCreateUser } from "./lib/profilesApi.js";
 import { parseDotSanXuat, parseSoLoDate, productionDate, monthLabelVN } from "./lib/materialsQc.js";
-import { planSingleComponent, planTwoComponent, TANK_MAX_L, MAX_LOTS_PER_BATCH, TUBE_TOL_LOW } from "./lib/mixPlanner.js";
+import { planSingleComponent, planTwoComponent, planManualBatches, calcManualMe, suggestManualLots, TANK_MAX_L, MAX_LOTS_PER_BATCH, TUBE_TOL_LOW } from "./lib/mixPlanner.js";
 import { fetchMixPlans, fetchMixPlansByIds, saveMixPlanDecision, saveEditedMixPlanDecision, removeMixPlan, reviewMixPlanWithAi } from "./lib/mixPlansApi.js";
 import { fetchFinishedBatches, createFinishedBatch, updateFinishedBatchField } from "./lib/finishedBatchesApi.js";
 
 // "Chờ SX" KHÔNG nằm trong danh sách này nữa (2026-07-30, NCV yêu cầu) — chuyển sang nằm trong mục
-// "Pha chế" (cạnh "Pha chế NCV"/"Pha chế SX") vì về bản chất là 1 bước của quy trình pha chế, không
+// "Pha chế" (cạnh "Pha chế GMP"/"Pha chế SX") vì về bản chất là 1 bước của quy trình pha chế, không
 // phải trạng thái nguyên liệu thô như các mục còn lại — xem Sidebar, render riêng ở đó.
 const NL_TABS = [
   { key: "cho-kqkn", label: "Chờ KQKN", icon: FlaskConical },
@@ -524,7 +524,7 @@ function Connected({ session, profile }) {
   const actorId = session.user.id;
   const isAdmin = profile.role === "admin";
   // Phân quyền theo vai trò (profile.role) — chốt với NCV 2026-07-30: admin sửa được mọi thứ; RD sửa
-  // được toàn bộ phần SẢN XUẤT (Pha chế NCV/Pha chế SX/Chờ SX/Sản phẩm) nhưng KHÔNG được đụng vào
+  // được toàn bộ phần SẢN XUẤT (Pha chế GMP/Pha chế SX/Chờ SX/Sản phẩm) nhưng KHÔNG được đụng vào
   // "Quản lý NL" (mọi tab NL — kể cả Chờ KQKN); QC CHỈ sửa được đúng các cột kết quả kiểm nghiệm
   // (Cảm quan/pH/MĐ nhãn/MĐ SH/Bào tử %/Nhiễm khuẩn/Nhiễm con nào/Ghi chú) trong tab Chờ KQKN, không
   // đụng gì khác kể cả Thời gian thu/Lô chủng/V dịch của chính tab đó; KH chỉ được bấm "Tính kế
@@ -663,17 +663,6 @@ function Connected({ session, profile }) {
     updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi: ${err.message}`));
   };
 
-  const confirmMix = async (ids, maSP, me, loai, soLuongDuKien) => {
-    const patch = { daPha: true, daPhaAt: new Date().toISOString(), phaProduct: maSP, phaMe: me, loai };
-    setMaterials((prev) => prev.map((r) => (ids.includes(r.id) ? { ...r, ...patch, updatedBy: actorId } : r)));
-    try {
-      await confirmMixBatch(ids, patch, actorId);
-      const tenSP = products.find((p) => p.maSP === maSP)?.tenSP;
-      await createFinishedBatch({ tenSP, phaMe: me, soLuongDuKien, createdBy: actorId });
-      goToProductionHistory(maSP);
-    } catch (err) { setNote(`Lỗi xác nhận pha: ${err.message}`); reload(); }
-  };
-
   const addLot = async ({ strain, lo, soChai }) => {
     const trimmedLo = lo.trim();
     const existing = materials.find((r) => r.lo === trimmedLo);
@@ -729,6 +718,22 @@ function Connected({ session, profile }) {
     const patch = { huyThuCong: true, choXuLyThuCong: false };
     setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
     updateMaterialFields(id, patch, actorId).catch((err) => setNote(`Lỗi: ${err.message}`));
+  };
+
+  // Đưa 1 chai từ "Đã pha"/"Đã huỷ" (chuyển nhầm) về lại "Chờ pha": xoá cờ đã pha, mã mẻ pha, cờ huỷ/chờ xử lý
+  // thủ công và cả dấu vết Chờ SX (choSX/mixPlan*) — nếu không chai sẽ quay lại Chờ SX thay vì Chờ pha. Trạng thái cuối cùng vẫn do dữ liệu QC quyết định (vd chai không đạt sẽ rơi vào Chờ xử lý).
+  // Chai bị tách lúc Duyệt kế hoạch (số lô có hậu tố -P<id>M<mẻ>) được gộp ngược về lô gốc giống revertChoSXGroup.
+  const forceChoPha = async (id) => {
+    const row = materials.find((r) => r.id === id);
+    if (!row) return;
+    const patch = { daPha: false, daPhaAt: null, phaProduct: null, phaMe: null, choXuLyThuCong: false, huyThuCong: false, choSX: false, choSxAt: null, daGuiMailAt: null, mixPlanId: null, mixPlanMeSo: null };
+    setMaterials((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch, updatedBy: actorId } : r)));
+    try {
+      await updateMaterialFields(id, patch, actorId);
+      if (/-P\d+M\d+$/.test(row.soLo)) await revertChoSXGroup([{ ...row, ...patch }], materials, actorId);
+      setNote(`Đã chuyển số lô ${row.soLo} về "Chờ pha".`);
+      reload();
+    } catch (err) { setNote(`Lỗi chuyển về Chờ pha: ${err.message}`); reload(); }
   };
 
   const counts = useMemo(() => {
@@ -861,7 +866,7 @@ function Connected({ session, profile }) {
                     <MaterialTable rows={rows} status={tab} onEdit={editField} onRemove={removeRec}
                       onSoftDelete={softDeleteRec} onRestore={restoreRec} profilesById={profilesById}
                       canEditNL={canEditNL} canEditQcResults={canEditQcResults} onAddBottle={addBottleToLot}
-                      onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} setNote={setNote} />
+                      onForceDaPha={forceDaPha} onForceChoXuLy={forceChoXuLy} onForceDaHuy={forceDaHuy} onForceChoPha={forceChoPha} setNote={setNote} />
                   </>
                 );
               })()}
@@ -872,7 +877,7 @@ function Connected({ session, profile }) {
                   choSxMaterials={materials.filter((r) => statusOf(r).status === "cho-sx" && !!r.daGuiMailAt === (tab === "cho-sx-da-gui"))}
                   allMaterials={materials} products={products} actorId={actorId} setNote={setNote} onConfirmed={goToProductionHistory} canEdit={canEditProduction} />
               )}
-              {tab === "pha" && <MixPanel materials={materials} products={products} onConfirm={confirmMix} canEdit={canEditProduction} />}
+              {tab === "pha" && <MixPlanPanel mode="ncv" materials={materials} products={products} actorId={actorId} setNote={setNote} reload={reload} canEdit={canEditProduction} canPreview={canEditProduction} role={profile.role} userLabel={profile?.fullName || identityLabel(session.user)} />}
               {tab === "ke-hoach" && <MixPlanPanel materials={materials} products={products} actorId={actorId} setNote={setNote} reload={reload} canEdit={canEditProduction} canPreview={canPreviewPlan} role={profile.role} userLabel={profile?.fullName || identityLabel(session.user)} />}
               {tab === "sp" && <ProductPanel products={products} setProducts={setProducts} setNote={setNote} isAdmin={isAdmin} canEdit={canEditProduction} />}
               {tab === "sp-history" && <ProductionHistoryPanel products={products} setNote={setNote} focusMaSP={spFocus?.maSP} focusTs={spFocus?.ts} canEdit={canEditProduction} />}
@@ -937,7 +942,7 @@ function Sidebar({ tab, setTab, counts, userEmail, userFullName, isAdmin, isQC, 
             <button onClick={() => setTab("pha")}
               className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === "pha" ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
               style={tab === "pha" ? { color: ACTIVE_TEXT } : undefined}>
-              <span className="flex-1 text-left">Pha chế NCV</span>
+              <span className="flex-1 text-left">Pha chế GMP</span>
             </button>
             <button onClick={() => setTab("ke-hoach")}
               className={`w-full flex items-center gap-2 pl-8 pr-3 py-2 text-[13px] transition rounded ${tab === "ke-hoach" ? "bg-white font-medium" : "text-white/85 hover:bg-white/10"}`}
@@ -1104,7 +1109,7 @@ function Breadcrumb({ tab, focusMaSP, products }) {
   const focusedProduct = focusMaSP && (products || []).find((p) => p.maSP === focusMaSP);
   const parts = nlTab ? ["Trang chủ", "Quản lý NL", nlTab.label]
     : tab === "cho-xoa" ? ["Trang chủ", "Quản lý NL", "Chờ pha", "Thùng rác"]
-    : tab === "pha" ? ["Trang chủ", "Pha chế NCV"]
+    : tab === "pha" ? ["Trang chủ", "Pha chế GMP"]
     : tab === "ke-hoach" ? ["Trang chủ", "Pha chế SX"]
     : tab === "cho-sx" ? ["Trang chủ", "Pha chế", "Chờ SX", "Chưa gửi mail"]
     : tab === "cho-sx-da-gui" ? ["Trang chủ", "Pha chế", "Chờ SX", "Đã gửi mail"]
@@ -1262,6 +1267,42 @@ function ForceStatusSelect({ soLo, onDaPha, onChoXuLy, onDaHuy }) {
 }
 
 /* ---------------- Ô sửa nhanh ---------------- */
+/** Quy tắc mẻ riêng của sản phẩm (cột quy_tac_me): tối đa/tối thiểu (L), tối đa chai/mẻ, chỉ dùng NL cùng 1 lô.
+ * Để trống hết = dùng quy tắc chung (tank 1080L, ≤3 chai/mẻ, mẻ ≥700L, được ghép lô). */
+function MeRulesCell({ value, onChange, disabled }) {
+  const q = value && typeof value === "object" ? value : {};
+  const toDraft = () => ({ maxV: q.maxV ?? "", minV: q.minV ?? "", maxLots: q.maxLots ?? "", oneLo: !!q.oneLo, wholeBottle: !!q.wholeBottle, goodMin: q.goodMin ?? "", goodMax: q.goodMax ?? "" });
+  const [draft, setDraft] = useState(toDraft);
+  useEffect(() => { setDraft(toDraft()); }, [q.maxV, q.minV, q.maxLots, q.oneLo, q.wholeBottle, q.goodMin, q.goodMax]);
+  const commit = (d) => {
+    const n = (v) => { const x = Number(String(v).replace(",", ".")); return Number.isFinite(x) && x > 0 ? x : null; };
+    const out = { maxV: n(d.maxV), minV: n(d.minV), maxLots: n(d.maxLots), oneLo: !!d.oneLo, wholeBottle: !!d.wholeBottle, goodMin: n(d.goodMin), goodMax: n(d.goodMax) };
+    onChange(out.maxV || out.minV || out.maxLots || out.oneLo || out.wholeBottle ? out : null);
+  };
+  const box = (key, ph, w) => (
+    <input value={draft[key]} disabled={disabled} placeholder={ph} inputMode="decimal"
+      onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value.replace(/[^0-9.,]/g, "") }))}
+      onBlur={() => commit(draft)} title={ph}
+      className={`${w} text-[11px] border border-slate-200 rounded px-1 py-0.5 text-right disabled:bg-slate-50`} />
+  );
+  return (
+    <div className="flex flex-col gap-0.5" title="Quy tắc mẻ riêng của sản phẩm — để trống = quy tắc chung">
+      <div className="flex items-center gap-1 text-[10px] text-slate-400">≤{box("maxV", "Tối đa L", "w-12")}L · ≥{box("minV", "Tối thiểu L", "w-12")}L</div>
+      <div className="flex items-center gap-1 text-[10px] text-slate-400">≤{box("maxLots", "Chai/mẻ", "w-8")} chai
+        <label className="flex items-center gap-0.5 ml-1 cursor-pointer"><input type="checkbox" checked={draft.oneLo} disabled={disabled} className="accent-emerald-600"
+          onChange={(e) => { const d = { ...draft, oneLo: e.target.checked }; setDraft(d); commit(d); }} />cùng 1 lô</label>
+      </div>
+      <div className="flex items-center gap-1 text-[10px] text-slate-400">
+        <label className="flex items-center gap-0.5 cursor-pointer" title="Mỗi chai dùng trọn trong 1 mẻ, không chia dở cho mẻ sau"><input type="checkbox" checked={draft.wholeBottle} disabled={disabled} className="accent-emerald-600"
+          onChange={(e) => { const d = { ...draft, wholeBottle: e.target.checked }; setDraft(d); commit(d); }} />dùng hết chai</label>
+      </div>
+      {draft.wholeBottle && (
+        <div className="flex items-center gap-1 text-[10px] text-slate-400">lý tưởng {box("goodMin", "Lý tưởng từ L", "w-12")}–{box("goodMax", "Lý tưởng đến L", "w-12")}L</div>
+      )}
+    </div>
+  );
+}
+
 function EditText({ v, on, w = "w-24", ph, disabled, err, commitOnBlur, title }) {
   // commitOnBlur: chỉ lưu (và do đó chỉ kích hoạt phân loại lại trạng thái, vd nhảy sang
   // "Chờ xử lý") lúc rời khỏi ô — không lưu theo từng ký tự như mặc định, tránh dòng bị
@@ -1493,7 +1534,7 @@ function parsePasteValue(col, raw, row) {
  * 1 <table> HTML riêng. Vẫn gọi đúng `onEdit` sẵn có cho từng ô — không viết lại logic lưu. */
 function MaterialGroupTable({
   groupKey, list, status, roGeneral, roQcFields, allowQcOverride, canRowAction, showReason, reasonLabel,
-  onEdit, onRemove, onSoftDelete, onRestore, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy,
+  onEdit, onRemove, onSoftDelete, onRestore, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy, onForceChoPha,
   nameOf, setNote,
 }) {
   const [open, setOpenSelf] = useState(true);
@@ -1852,6 +1893,14 @@ function MaterialGroupTable({
                             title="Chuyển sang Đã huỷ" className="text-slate-400 hover:text-rose-600"><Ban className="w-3.5 h-3.5" /></button>
                           <button onClick={()=>onRemove(r.id)} title="Xoá vĩnh viễn" className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
                         </div>
+                      ) : (status === "da-pha" || (status === "da-huy" && r.huyThuCong)) ? (
+                        <div className="flex items-center justify-end gap-2">
+                          <button onClick={()=>{ if (window.confirm(`Chuyển số lô ${r.soLo} từ "${status === "da-pha" ? "Đã pha" : "Đã huỷ"}" về "Chờ pha"?${status === "da-pha" ? " (Mã mẻ pha gắn với chai này sẽ bị bỏ.)" : ""}`)) onForceChoPha(r.id); }}
+                            title="Chuyển nhầm? Đưa về Chờ pha" className="flex items-center gap-1 text-[11px] border border-slate-200 hover:border-emerald-300 text-slate-500 hover:text-emerald-700 rounded px-1.5 py-1 bg-white">
+                            <RotateCcw className="w-3 h-3" /> Về Chờ pha
+                          </button>
+                          <button onClick={()=>onRemove(r.id)} className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
+                        </div>
                       ) : (
                         <button onClick={()=>onRemove(r.id)} className="text-slate-300 hover:text-rose-500"><Trash2 className="w-3.5 h-3.5" /></button>
                       )}
@@ -1975,7 +2024,7 @@ function ChoXuLyMonthlyReport({ rows, setNote }) {
   );
 }
 
-function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy, setNote }) {
+function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore, profilesById, canEditNL, canEditQcResults, onAddBottle, onForceDaPha, onForceChoXuLy, onForceDaHuy, onForceChoPha, setNote }) {
   const ro = status === "da-pha" || status === "da-huy" || status === "cho-xoa";
   // Thời gian thu/Lô chủng/V dịch: chỉ admin sửa được (dữ liệu nhập liệu/logistics, không phải "kết
   // quả kiểm nghiệm"). Cảm quan/pH/MĐ nhãn/MĐ SH/Bào tử %/Nhiễm khuẩn/Nhiễm con nào/Ghi chú: admin
@@ -2039,7 +2088,7 @@ function MaterialTable({ rows, status, onEdit, onRemove, onSoftDelete, onRestore
           roGeneral={roGeneral} roQcFields={roQcFields} allowQcOverride={allowQcOverride} canRowAction={canRowAction}
           showReason={showReason} reasonLabel={reasonLabel} nameOf={nameOf} setNote={setNote}
           onEdit={onEdit} onRemove={onRemove} onSoftDelete={onSoftDelete} onRestore={onRestore}
-          onAddBottle={onAddBottle} onForceDaPha={onForceDaPha} onForceChoXuLy={onForceChoXuLy} onForceDaHuy={onForceDaHuy} />
+          onAddBottle={onAddBottle} onForceDaPha={onForceDaPha} onForceChoXuLy={onForceChoXuLy} onForceDaHuy={onForceDaHuy} onForceChoPha={onForceChoPha} />
       ))}
     </div>
   );
@@ -2074,116 +2123,6 @@ function usePresence(channelName, selfKey, selfLabel) {
     return () => { supabase.removeChannel(channel); };
   }, [channelName, selfKey, selfLabel]);
   return others;
-}
-
-function MixPanel({ materials, products, onConfirm, canEdit }) {
-  const [maSP, setMaSP] = useState(products[0]?.maSP || "");
-  const [sel, setSel] = useState({});
-  const sp = products.find((p) => p.maSP === maSP) || products[0];
-
-  const poolMatch = (r) => {
-    if (!sp) return false;
-    const st = statusOf(r);
-    if (st.status !== "cho-pha" || r.mdSH == null) return false;
-    if (sp.pool === "subtilis") return r.strain === "subtilis";
-    if (sp.pool === "clausii-loai1") return r.strain === "clausii" && st.loai === 1;
-    if (sp.pool === "clausii-loai2") return r.strain === "clausii" && st.loai === 2;
-    return false;
-  };
-  const groups = useMemo(() => {
-    if (!sp) return [];
-    const g = {};
-    for (const r of materials.filter(poolMatch)) (g[r.lo] ||= []).push(r);
-    const chaiNum = (r) => parseInt(String(r.chai || "").replace(/[^0-9]/g, ""), 10) || 0;
-    for (const list of Object.values(g)) list.sort((a, b) => chaiNum(a) - chaiNum(b) || a.soLo.localeCompare(b.soLo));
-    return Object.entries(g).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [materials, sp]);
-
-  const toggle = (id) => setSel((s) => ({ ...s, [id]: !s[id] }));
-  const toggleLo = (list) => { const all = list.every((r) => sel[r.id]); setSel((s) => { const n = { ...s }; list.forEach((r) => (n[r.id] = !all)); return n; }); };
-
-  const chosen = materials.filter((r) => sel[r.id] && poolMatch(r));
-  const totals = chosen.reduce((a, r) => { const t = tinhPha(r, sp); if (t) { a.vPha += t.vPhaL; a.soOng += t.soOng; } return a; }, { vPha: 0, soOng: 0 });
-  const soNhip = sp?.soOngNhip ? totals.soOng / sp.soOngNhip : null;
-  const loSet = new Set(chosen.map((r) => r.lo));
-  const loaiForPool = sp?.pool === "clausii-loai1" ? 1 : sp?.pool === "clausii-loai2" ? 2 : null;
-  const confirm = () => {
-    if (!chosen.length) return;
-    const me = `${maSP}-${new Date().toISOString().slice(2, 10).replace(/-/g, "")}`;
-    onConfirm(chosen.map((r) => r.id), maSP, me, loaiForPool, totals.soOng);
-    setSel({});
-  };
-
-  if (!sp) return <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Chưa có sản phẩm nào — thêm ở tab “Sản phẩm”.</div>;
-
-  return (
-    <div className="space-y-3">
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <div className="lg:col-span-2 space-y-3">
-        <div className="bg-white rounded-lg border border-slate-200 p-4">
-          <label className="text-xs text-slate-500">Sản phẩm cần pha</label>
-          <select value={maSP} onChange={(e) => { setMaSP(e.target.value); setSel({}); }} className="w-full mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm">
-            {products.map((p) => <option key={p.maSP} value={p.maSP}>{p.maSP} – {p.tenSP}</option>)}
-          </select>
-          {sp && (
-            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
-              <span>Nguồn NL: <b className="text-slate-700">{POOL_LABEL[sp.pool]}</b></span>
-              <span>Hàm lượng: <b className="text-slate-700">{sci(sp.hamLuong)} cfu/ml</b></span>
-              <span>Thể tích ống: <b className="text-slate-700">{sp.tubeMl} ml</b></span>
-              <span>NCV: <b className="text-slate-700">{sp.ncv || "–"}</b></span>
-            </div>
-          )}
-        </div>
-        <p className="text-xs text-slate-500 flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-          Ưu tiên pha hết các chai trong <b>cùng 1 lô</b> rồi mới vệ sinh – tiệt trùng để chuyển sang lô khác.</p>
-        {!groups.length && <div className="bg-white rounded-lg border border-slate-200 p-8 text-center text-slate-400 text-sm">Không có NL phù hợp trong “chờ pha” cho nguồn này.</div>}
-        {groups.map(([key, list], idx) => {
-          const allSel = list.every((r) => sel[r.id]);
-          return (
-            <div key={key} className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-2 bg-slate-50 border-b border-slate-100">
-                <span className={`text-[11px] px-2 py-0.5 rounded-full ${idx === 0 ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"}`}>{idx === 0 ? "Ưu tiên" : `#${idx + 1}`}</span>
-                <span className="font-mono text-sm font-medium">{key}</span>
-                {canEdit && <button onClick={() => toggleLo(list)} className="ml-auto text-xs text-emerald-600 hover:underline">{allSel ? "Bỏ chọn lô" : "Chọn cả lô"}</button>}
-              </div>
-              <table className="w-full text-xs">
-                <tbody>
-                  {list.map((r) => {
-                    const t = tinhPha(r, sp);
-                    return (
-                      <tr key={r.id} className="border-b border-slate-50">
-                        <td className="pl-4 py-1.5 w-8"><input type="checkbox" checked={!!sel[r.id]} disabled={!canEdit} onChange={() => toggle(r.id)} className="accent-emerald-600 disabled:opacity-40" /></td>
-                        <td className="px-2 py-1.5 font-mono">{r.soLo}</td>
-                        <td className="px-2 py-1.5 text-slate-500">{fmt(r.vDich, 1)} L · SH {fmt(r.mdSH)}</td>
-                        <td className="px-2 py-1.5 text-right font-medium">{t ? `${fmt(t.vPhaL, 1)} L` : "–"}</td>
-                        <td className="px-4 py-1.5 text-right text-slate-500">{t ? `${fmt(t.soOngNghin, 2)} nghìn ống` : ""}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          );
-        })}
-      </div>
-      <div className="lg:col-span-1">
-        <div className="bg-white rounded-lg border border-slate-200 p-4 lg:sticky lg:top-32">
-          <h3 className="font-semibold text-sm mb-3 flex items-center gap-2"><Beaker className="w-4 h-4 text-emerald-600" /> Mẻ pha chế</h3>
-          <Row label="Số chai chọn" value={chosen.length} />
-          <Row label="Số lô sử dụng" value={loSet.size} warn={loSet.size > 1} />
-          <Row label="Tổng V pha chế" value={`${fmt(totals.vPha, 1)} L`} />
-          <Row label="Tổng số ống" value={`${fmt(totals.soOng / 1000, 2)} nghìn`} />
-          {soNhip != null && <Row label="Số nhịp sản xuất" value={fmt(soNhip, 2)} />}
-          {loSet.size > 1 && <p className="text-[11px] text-amber-600 mt-2 flex gap-1"><AlertTriangle className="w-3.5 h-3.5 shrink-0" /> Đang trộn nhiều lô – cần tiệt trùng hệ thống giữa các lô.</p>}
-          <button onClick={confirm} disabled={!canEdit || !chosen.length} title={!canEdit ? "Tài khoản của bạn chỉ xem được, không xác nhận pha được" : undefined}
-            className="w-full mt-4 flex items-center justify-center gap-2 bg-emerald-600 text-white text-sm py-2.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
-            <CheckCircle2 className="w-4 h-4" /> Xác nhận pha → Đã pha</button>
-          <p className="text-[11px] text-slate-400 mt-2">Các chai đã pha sẽ chuyển sang tab “NL đã pha” và gắn mã mẻ tự động.</p>
-        </div>
-      </div>
-    </div>
-    </div>
-  );
 }
 
 /** Trả 1 mẻ Chờ SX về "Chờ pha" (bỏ ý định pha nữa) — với LÔ ĐÃ BỊ TÁCH lúc Duyệt (so_lo có hậu tố
@@ -2507,6 +2446,16 @@ const XU_LY_SAU_DONG_ONG_OPTIONS = ["Hấp 70°C/40 phút", "Không hấp"];
 const QUY_TRINH_KHAC_OPTIONS = ["Hấp trong tank 70°C/40 phút", "Không duy trì nhiệt trong tank"];
 const CHOT_HUONG_OPTIONS = ["Hoàn thiện luôn", "Chờ KQKN"];
 const KHAC_SENTINEL = "__khac__";
+/** Quy tắc mẻ riêng của sản phẩm (cột quy_tac_me) -> dạng đầy đủ, hoặc null nếu sản phẩm dùng quy tắc chung. */
+const mixRulesOf = (sp) => {
+  const q = sp?.quyTacMe;
+  if (!q || typeof q !== "object") return null;
+  return {
+    maxV: Number(q.maxV) > 0 ? Number(q.maxV) : TANK_MAX_L, minV: Number(q.minV) > 0 ? Number(q.minV) : 0,
+    maxLots: Number(q.maxLots) > 0 ? Number(q.maxLots) : MAX_LOTS_PER_BATCH, oneLo: !!q.oneLo, wholeBottle: !!q.wholeBottle,
+    goodMin: Number(q.goodMin) > 0 ? Number(q.goodMin) : undefined, goodMax: Number(q.goodMax) > 0 ? Number(q.goodMax) : undefined,
+  };
+};
 const VE_SINH_TIET_TRUNG_LABEL = "Vệ sinh — tiệt trùng hệ thống";
 
 function tenNguyenLieuFor(chung, sp) {
@@ -3043,8 +2992,364 @@ function draftLotState(row, materials) {
   return choSx ? "cho-sx" : "ok";
 }
 
+/** Pha chế GMP: NCV tự tick các chai NL muốn dùng (dùng hết 100%) và nhập cỡ lô (L) từng mẻ. Chỉ hiện
+ * số liệu tham khảo (NL đã tick đủ pha được bao nhiêu lít ở mật độ đích) — việc rải NL vào mẻ do
+ * planManualSingle/planManualTwo làm khi bấm "Tính kế hoạch". */
+function LockCheck({ checked, onChange, label, disabled }) {
+  return (
+    <label className={`flex items-center gap-1.5 text-[11px] text-slate-600 select-none ${disabled ? "opacity-50" : "cursor-pointer"}`}
+      title="Tích = chỉ tiêu này là ĐẦU VÀO cố định, chỉ tiêu còn lại hệ thống tính ra">
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} className="accent-emerald-600" />
+      {label}
+    </label>
+  );
+}
+
+/** Pha chế GMP: NCV TỰ dựng từng mẻ — chọn chai NL nào vào mẻ nào, rồi tích "cố định" chỉ tiêu làm đầu
+ * vào (thể tích/cỡ lô hoặc mật độ), chỉ tiêu còn lại hệ thống tính ngay (calcManualMe). Không có bước tự
+ * chia mẻ: mỗi chai chỉ thuộc đúng 1 mẻ NCV đã gán. */
+function ManualMixBuilder({ sp, poolLots, mes, setMes, newMe, kieu, setKieu, onCreate, targets, canEdit }) {
+  const share = kieu === "ghep";
+  const rules = mixRulesOf(sp);
+  const streams = [{ key: "a", pool: sp.pool, g: targets[0] }, ...(sp.pool2 ? [{ key: "b", pool: sp.pool2, g: targets[1] }] : [])];
+  const lotsOf = streams.map((st) => poolLots(st.pool, sp.allowOtherLoai));
+  const assigned = new Set(mes.flatMap((m) => [...m.chai.a, ...m.chai.b]));
+  const patchMe = (id, patch) => setMes((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+  // Luôn ≥1 chỉ tiêu cố định: bỏ tích ô này thì ô kia tự tích.
+  // Pha đủ mẻ: chỉ cố định ĐÚNG 1 trong 2 (cả hai thì phải dùng dở chai); pha ghép mẻ: tích tự do, luôn ≥1.
+  const setLockV = (m, v) => patchMe(m.id, share ? { lockV: v, lockD: v ? m.lockD : true } : { lockV: v, lockD: !v });
+  const setLockD = (m, v) => patchMe(m.id, share ? { lockD: v, lockV: v ? m.lockV : true } : { lockD: v, lockV: !v });
+  const changeKieu = (k) => {
+    setKieu(k);
+    setMes((prev) => prev.map((m) => ({ ...m, chai: { a: [], b: [] }, lockV: true, lockD: k === "ghep" })));
+  };
+  const cfg = { H: sp.tubeMl, targets: streams.map((st) => st.g), rules };
+  // Mô phỏng lần lượt từng mẻ: pha ghép mẻ thì mẻ sau chỉ còn phần chai mẻ trước chưa dùng.
+  const sims = (() => {
+    const used = {};
+    return mes.map((m) => {
+      const before = { ...used };
+      const lots = streams.map((_, si) => (si === 0 ? m.chai.a : m.chai.b)
+        .map((id) => lotsOf[si].find((l) => l.maLo === id)).filter(Boolean)
+        .map((l) => (share ? { ...l, F: l.F - (before[l.maLo] || 0), carry: (before[l.maLo] || 0) > 1e-9 } : l))
+        .filter((l) => l.F > 1e-6));
+      const calc = lots.every((l) => l.length)
+        ? calcManualMe({ lots, vL: num(m.v), lockV: m.lockV, lockD: m.lockD }, cfg)
+        : { ok: false, reason: "Chọn chai NL cho mẻ này." };
+      if (share && calc.ok) calc.streams.forEach((st) => st.forEach((x) => { used[x.lot.maLo] = (used[x.lot.maLo] || 0) + x.raw; }));
+      return { lots, calc, before };
+    });
+  })();
+  // Kho chai (bảng quy đổi bên dưới) thêm vào mẻ đang chọn; bấm tiêu đề thẻ mẻ để đổi mẻ đang chọn.
+  const [activeId, setActiveId] = useState(null);
+  const activeMe = mes.find((m) => m.id === activeId) || mes[0];
+  // Gán chai cho 1 mẻ; khi mẻ đã đủ chai cho mọi thành phần thì TỰ NHẢY sang mẻ kế tiếp chưa có chai (cuộn tới
+  // thẻ mẻ đó) — để NCV tích lần lượt mẻ 1 → 2 → 3 không phải tự chọn lại "đang thêm vào mẻ nào".
+  const keyOfStream = (si) => (si === 0 ? "a" : "b");
+  const commitChai = (meId, nextChai, extra = {}) => {
+    patchMe(meId, { chai: nextChai, ...extra });
+    const complete = streams.every((_, si) => nextChai[keyOfStream(si)].length > 0);
+    if (!complete) return;
+    const idx = mes.findIndex((m) => m.id === meId);
+    const next = mes.slice(idx + 1).find((m) => !streams.every((_, si) => m.chai[keyOfStream(si)].length > 0));
+    if (!next) return;
+    setActiveId(next.id);
+    setTimeout(() => document.getElementById(`me-card-${next.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+  };
+  const assignTo = (si, maLo, meId) => {
+    const m = mes.find((x) => x.id === meId);
+    const k = keyOfStream(si);
+    commitChai(meId, { ...m.chai, [k]: [...m.chai[k], maLo] });
+  };
+  const unassign = (si, maLo) => setMes((prev) => prev.map((m) => ({ ...m, chai: { ...m.chai, [si === 0 ? "a" : "b"]: (si === 0 ? m.chai.a : m.chai.b).filter((x) => x !== maLo) } })));
+  const [nMe, setNMe] = useState("");
+  const [vAll, setVAll] = useState("");
+  const createMes = () => {
+    const n = Math.min(30, parseInt(nMe, 10) || 0);
+    if (!(n > 0) || !(num(vAll) > 0)) return;
+    setMes(Array.from({ length: n }, () => ({ ...newMe(), v: String(num(vAll)), lockV: true, lockD: share })));
+    setActiveId(null);
+  };
+  const meIndexOf = (si, maLo) => mes.findIndex((m) => (si === 0 ? m.chai.a : m.chai.b).includes(maLo));
+
+  return (
+    <div className="space-y-3">
+    <div className="bg-white rounded-lg border border-slate-200 p-4">
+      <h3 className="font-semibold text-sm">1. Chọn số mẻ và cỡ lô</h3>
+      <p className="text-[11px] text-slate-400 mt-0.5">Hệ thống sẽ tạo các mẻ và gợi ý chai NL phù hợp cho từng mẻ — bạn tích chọn gợi ý ở bên dưới. Thể tích (L) và cỡ lô (ống) quy đổi qua lại theo ống {sp.tubeMl} ml.</p>
+      <div className="mt-3 flex flex-col gap-1 text-sm text-slate-700">
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="kieuPha" checked={kieu === "du"} onChange={() => changeKieu("du")} disabled={!canEdit} className="accent-emerald-600 mt-1" />
+          <span><b>Pha đủ mẻ</b> <span className="text-slate-500">— tròn chai: chai nào vào mẻ nào thì dùng hết ở mẻ đó. Cố định cỡ lô thì phải chấp nhận mật độ bị đẩy cao hơn đích.</span></span>
+        </label>
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="kieuPha" checked={kieu === "ghep"} onChange={() => changeKieu("ghep")} disabled={!canEdit || !!rules?.wholeBottle} className="accent-emerald-600 mt-1" />
+          <span><b>Pha ghép mẻ</b> <span className="text-slate-500">— 1 chai được chia dở cho nhiều mẻ (phần dư chuyển sang mẻ sau), mật độ giữ đúng đích.{rules?.wholeBottle ? " Sản phẩm này quy định dùng hết chai nên không dùng được kiểu này." : ""}</span></span>
+        </label>
+      </div>
+      <div className="mt-3 flex flex-wrap items-end gap-3">
+        <div>
+          <label className="text-[11px] text-slate-500">Số mẻ</label>
+          <input value={nMe} onChange={(e) => setNMe(e.target.value.replace(/[^0-9]/g, ""))} placeholder="vd 3" disabled={!canEdit}
+            className="block mt-0.5 w-20 text-sm border border-slate-300 rounded px-2 py-1.5 text-right" />
+        </div>
+        <div>
+          <label className="text-[11px] text-slate-500">Cỡ lô mỗi mẻ</label>
+          <div className="flex items-center gap-1 mt-0.5">
+            <input value={vAll} disabled={!canEdit} inputMode="decimal" placeholder="L" onChange={(e) => setVAll(e.target.value.replace(/[^0-9.,]/g, ""))}
+              className="w-24 text-sm border border-slate-300 rounded px-2 py-1.5 text-right" />
+            <span className="text-[11px] text-slate-400">L</span>
+            <span className="text-slate-300">⇄</span>
+            <input value={num(vAll) > 0 ? fmt(Math.floor((num(vAll) * 1000) / sp.tubeMl), 0) : ""} disabled={!canEdit} inputMode="numeric" placeholder="ống"
+              onChange={(e) => { const o = parseInt(e.target.value.replace(/[^0-9]/g, ""), 10); setVAll(o > 0 ? String(Math.round((o * sp.tubeMl) / 10) / 100) : ""); }}
+              className="w-28 text-sm border border-slate-300 rounded px-2 py-1.5 text-right" />
+            <span className="text-[11px] text-slate-400">ống</span>
+          </div>
+        </div>
+        {canEdit && (
+          <button onClick={createMes} disabled={!(parseInt(nMe, 10) > 0) || !(num(vAll) > 0)}
+            className="flex items-center gap-1.5 bg-emerald-600 text-white text-sm px-3 py-1.5 rounded-md hover:bg-emerald-700 disabled:opacity-40">
+            <Calculator className="w-4 h-4" /> Tạo mẻ &amp; gợi ý chai
+          </button>
+        )}
+      </div>
+    </div>
+
+    <details className="bg-white rounded-lg border border-slate-200 p-4">
+      <summary className="cursor-pointer font-semibold text-sm select-none">Kho chai NL — bảng quy đổi (chọn tay nếu không dùng gợi ý)</summary>
+      <div className="mt-3 space-y-3">
+      <p className="text-[11px] text-slate-400">Mỗi chai cho biết pha được bao nhiêu lít / bao nhiêu ống ở mật độ đích.</p>
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        <span className="text-slate-500">Thêm chai vào:</span>
+        {mes.map((m, i) => (
+          <button key={m.id} onClick={() => setActiveId(m.id)}
+            className={`px-2.5 py-1 rounded-full border ${activeMe?.id === m.id ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300 hover:bg-slate-50"}`}>Mẻ {i + 1}</button>
+        ))}
+      </div>
+      <div className={`grid gap-4 ${streams.length > 1 ? "lg:grid-cols-2" : ""}`}>
+        {streams.map((st, si) => {
+          const byLo = {};
+          lotsOf[si].forEach((l) => { (byLo[l.loSanXuat] ||= []).push(l); });
+          const groups = Object.entries(byLo).sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+            .map(([lo, list]) => [lo, [...list].sort((a, b) => a.maLo.localeCompare(b.maLo, undefined, { numeric: true }))]);
+          return (
+            <div key={st.key} className="border border-slate-200 rounded-md overflow-hidden">
+              <div className="px-3 py-2 bg-slate-50 border-b border-slate-100 text-xs font-semibold text-slate-700">
+                {POOL_LABEL[st.pool]} <span className="font-normal text-slate-400">· mật độ đích {sci(st.g)} cfu/ml · {lotsOf[si].length} chai</span>
+              </div>
+              {!groups.length && <div className="p-4 text-center text-xs text-slate-400">Không có NL phù hợp trong “Chờ pha”.</div>}
+              <div className="max-h-80 overflow-auto">
+                <table className="w-full text-xs whitespace-nowrap">
+                  <thead className="sticky top-0 bg-white text-slate-400 text-left">
+                    <tr>{["Chai", "V dịch (L)", "MĐ SH", "Pha được (L)", "Pha được (ống)", ""].map((h, i) => <th key={i} className="px-2 py-1.5 font-medium">{h}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {groups.map(([lo, list]) => (
+                      <React.Fragment key={lo}>
+                        <tr className="bg-slate-50/80"><td colSpan={6} className="px-2 py-1 font-mono font-medium text-slate-600">{lo}</td></tr>
+                        {list.map((l) => {
+                          const capL = st.g > 0 ? (l.E * l.F) / st.g : 0;
+                          const mi = meIndexOf(si, l.maLo);
+                          const inActive = activeMe && (si === 0 ? activeMe.chai.a : activeMe.chai.b).includes(l.maLo);
+                          return (
+                            <tr key={l.maLo} className={`border-b border-slate-50 ${mi >= 0 ? "bg-emerald-50/60" : ""}`}>
+                              <td className="px-2 py-1 font-mono">{l.maLo}{l.priority === 1 && <span className="ml-1 text-[10px] text-slate-400">(dự phòng)</span>}</td>
+                              <td className="px-2 py-1">{fmt(l.F, 1)}</td>
+                              <td className="px-2 py-1">{sci(l.E)}</td>
+                              <td className="px-2 py-1 font-medium">{fmt(capL, 1)}</td>
+                              <td className="px-2 py-1 font-medium">{fmt(Math.floor((capL * 1000) / sp.tubeMl), 0)}</td>
+                              <td className="px-2 py-1 text-right">
+                                {mi >= 0 ? (
+                                  <span className="inline-flex items-center gap-1 text-emerald-700">Mẻ {mi + 1}
+                                    {canEdit && <button onClick={() => unassign(si, l.maLo)} title="Bỏ chai khỏi mẻ" className="text-emerald-600 hover:text-rose-600"><X className="w-3 h-3" /></button>}
+                                  </span>
+                                ) : null}
+                                {canEdit && activeMe && !inActive && (mi < 0 || share) && (() => {
+                                  const cur = streams.flatMap((_, sj) => (sj === 0 ? activeMe.chai.a : activeMe.chai.b).map((id) => lotsOf[sj].find((x) => x.maLo === id)).filter(Boolean));
+                                  const otherLo = rules?.oneLo && cur.some((x) => x.loSanXuat !== l.loSanXuat);
+                                  const full = rules && cur.length >= rules.maxLots;
+                                  if (otherLo || full) return <span className="ml-2 text-slate-300" title={otherLo ? "Mẻ này đã có chai của lô khác — không được trộn lô" : `Mẻ đã đủ ${rules.maxLots} chai`}>{otherLo ? "khác lô" : "đủ chai"}</span>;
+                                  return <button onClick={() => assignTo(si, l.maLo, activeMe.id)} className="ml-2 text-emerald-600 hover:underline">+ Mẻ {mes.indexOf(activeMe) + 1}</button>;
+                                })()}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      </div>
+    </details>
+
+    <div className="bg-white rounded-lg border border-slate-200 p-4 space-y-3">
+      <div>
+        <h3 className="font-semibold text-sm">2. Các mẻ pha — tích chọn chai gợi ý</h3>
+        <p className="text-[11px] text-slate-400 mt-0.5">
+          Mỗi mẻ: chọn chai NL cho mẻ đó, rồi tích “Cố định” cho chỉ tiêu bạn muốn giữ — chỉ tiêu còn lại tự tính. Thể tích (L) và cỡ lô (ống) quy đổi qua lại theo ống {sp.tubeMl} ml.
+        </p>
+      </div>
+      {mes.map((m, idx) => {
+        const { lots, calc, before } = sims[idx];
+        const vShown = !m.lockV ? (calc.ok ? calc.V : "") : num(m.v) > 0 ? num(m.v) : "";
+        const ongShown = vShown !== "" && vShown > 0 ? Math.floor((vShown * 1000) / sp.tubeMl) : "";
+        return (
+          <div key={m.id} id={`me-card-${m.id}`} className={`border rounded-lg overflow-hidden ${activeMe?.id === m.id ? "border-emerald-400" : "border-slate-200"}`}>
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border-b border-slate-100 cursor-pointer" onClick={() => setActiveId(m.id)}>
+              <span className="font-semibold text-sm">Mẻ {idx + 1}</span>
+              {activeMe?.id === m.id && <span className="text-[10px] text-emerald-700 bg-emerald-100 rounded-full px-2 py-0.5">đang thêm chai vào mẻ này</span>}
+              {mes.length > 1 && canEdit && (
+                <button onClick={() => setMes((prev) => prev.filter((x) => x.id !== m.id))} title="Xoá mẻ này" className="ml-auto text-slate-400 hover:text-rose-600"><X className="w-4 h-4" /></button>
+              )}
+            </div>
+            <div className="p-3 space-y-3">
+              {streams.map((st, si) => {
+                const ids = si === 0 ? m.chai.a : m.chai.b;
+                const setIds = (next) => patchMe(m.id, { chai: { ...m.chai, [st.key]: next } });
+                return (
+                  <div key={st.key} className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="font-medium text-slate-600 w-28 shrink-0">{POOL_LABEL[st.pool]}</span>
+                    {ids.map((id) => {
+                      const l0 = lotsOf[si].find((x) => x.maLo === id);
+                      const l = l0 && share ? { ...l0, F: l0.F - (before[id] || 0) } : l0;
+                      return (
+                        <span key={id} className="inline-flex items-center gap-1 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-full pl-2.5 pr-1.5 py-0.5">
+                          <span className="font-mono">{id}</span>
+                          {l && <span className="text-emerald-600/80">{fmt(l.F, 1)} L → pha {fmt((l.E * l.F) / st.g, 0)} L · {fmt(Math.floor((l.E * l.F * 1000) / (st.g * sp.tubeMl)), 0)} ống</span>}
+                          {canEdit && <button onClick={() => setIds(ids.filter((x) => x !== id))} className="text-emerald-600 hover:text-rose-600"><X className="w-3 h-3" /></button>}
+                        </span>
+                      );
+                    })}
+                    {!ids.length && <span className="text-slate-400">Chưa chọn chai — tích một gợi ý bên dưới.</span>}
+                  </div>
+                );
+              })}
+
+              {streams.map((st, si) => {
+                const ids = si === 0 ? m.chai.a : m.chai.b;
+                const vNeed = m.lockV ? num(m.v) : null;
+                if (!(vNeed > 0)) return null;
+                const taken = new Set(mes.filter((x) => x.id !== m.id).flatMap((x) => (si === 0 ? x.chai.a : x.chai.b)));
+                const pool = share
+                  ? lotsOf[si].map((l) => ({ ...l, F: l.F - (before[l.maLo] || 0), carry: (before[l.maLo] || 0) > 1e-9 })).filter((l) => l.F > 1e-6)
+                  : lotsOf[si].filter((l) => !taken.has(l.maLo));
+                const sugg = suggestManualLots(pool, st.g, vNeed, { mode: kieu, ...(rules ? { maxBottles: rules.maxLots, sameLo: rules.oneLo } : {}) });
+                const sameSet = (c) => c.lots.length === ids.length && c.lots.every((l) => ids.includes(l.maLo));
+                return (
+                  <div key={`sg-${st.key}`} className="border border-sky-100 bg-sky-50/40 rounded-md p-2 text-xs">
+                    <div className="font-medium text-sky-800 mb-1">Gợi ý chai {POOL_LABEL[st.pool]} cho {fmt(vNeed, 0)} L ({fmt(Math.floor((vNeed * 1000) / sp.tubeMl), 0)} ống)</div>
+                    {!sugg.length && <div className="text-slate-500">Không có tổ hợp chai nào (tối đa 3 chai) khớp cỡ lô này — thử đổi cỡ lô hoặc chọn tay ở bảng kho chai.</div>}
+                    <div className="space-y-1">
+                      {sugg.map((c, ci) => {
+                        const on = sameSet(c);
+                        return (
+                          <label key={ci} className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded px-2 py-1 border cursor-pointer ${on ? "bg-emerald-50 border-emerald-300" : "bg-white border-slate-200 hover:bg-slate-50"}`}>
+                            <input type="checkbox" checked={on} disabled={!canEdit} className="accent-emerald-600"
+                              onChange={() => {
+                                if (on) { patchMe(m.id, { chai: { ...m.chai, [st.key]: [] } }); return; }
+                                commitChai(m.id, { ...m.chai, [st.key]: c.lots.map((l) => l.maLo) }, c.partial ? { lockV: true, lockD: true } : {});
+                              }} />
+                            <span className="font-mono">{c.lots.map((l) => l.maLo).join(" + ")}</span>
+                            <span className="text-slate-500">pha được {fmt(c.capV, 0)} L</span>
+                            {c.partial
+                              ? <span className="text-amber-700">lấy 1 phần chai, dư ~{fmt(c.capV - vNeed, 0)} L pha chuyển sang mẻ sau — mật độ đúng đích</span>
+                              : <span className={c.dens > 0.05 ? "text-amber-700" : "text-emerald-700"}>dùng hết chai · mật độ {c.dens >= 0 ? "+" : ""}{fmt(c.dens * 100, 1)}% so với đích{c.dens > 0.05 ? " (đẩy cao mật độ)" : ""}</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+                <div>
+                  <div className="text-[11px] text-slate-500 mb-0.5">Thể tích mẻ pha ⇄ Cỡ lô</div>
+                  <div className="flex items-center gap-1">
+                    <input value={vShown === "" ? "" : String(vShown)} disabled={!canEdit || !m.lockV} inputMode="decimal" placeholder="L"
+                      onChange={(e) => patchMe(m.id, { v: e.target.value.replace(/[^0-9.,]/g, "") })}
+                      className="w-24 text-sm border border-slate-300 rounded px-2 py-1 text-right bg-white disabled:bg-slate-100 disabled:text-slate-600" />
+                    <span className="text-[11px] text-slate-400">L</span>
+                    <span className="text-slate-300">⇄</span>
+                    <input value={ongShown === "" ? "" : fmt(ongShown, 0)} disabled={!canEdit || !m.lockV} inputMode="numeric" placeholder="ống"
+                      onChange={(e) => {
+                        const o = parseInt(e.target.value.replace(/[^0-9]/g, ""), 10);
+                        patchMe(m.id, { v: o > 0 ? String(Math.round((o * sp.tubeMl) / 10) / 100) : "" });
+                      }}
+                      className="w-28 text-sm border border-slate-300 rounded px-2 py-1 text-right bg-white disabled:bg-slate-100 disabled:text-slate-600" />
+                    <span className="text-[11px] text-slate-400">ống</span>
+                  </div>
+                  <div className="mt-1"><LockCheck checked={m.lockV} onChange={(v) => setLockV(m, v)} label="Cố định cỡ lô" disabled={!canEdit} /></div>
+                </div>
+                <div>
+                  <div className="text-[11px] text-slate-500 mb-0.5">Mật độ{streams.length > 1 ? " (từng chủng)" : ""}</div>
+                  <div className="flex flex-col gap-0.5 text-sm">
+                    {streams.map((st, si) => (
+                      <span key={st.key} className="text-slate-700">
+                        {streams.length > 1 && <span className="text-[11px] text-slate-400 mr-1">{si === 0 ? "TP1" : "TP2"}</span>}
+                        <b>{calc.ok ? sci(calc.densities[si]) : m.lockD ? sci(st.g) : "—"}</b>
+                        <span className="text-[11px] text-slate-400"> cfu/ml · đích {sci(st.g)}</span>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-1"><LockCheck checked={m.lockD} onChange={(v) => setLockD(m, v)} label="Cố định mật độ" disabled={!canEdit} /></div>
+                </div>
+              </div>
+
+              {calc.ok ? (
+                <div className="text-xs bg-slate-50 rounded-md px-3 py-2 text-slate-600 flex flex-wrap gap-x-5 gap-y-1">
+                  <span>Thể tích <b className="text-slate-800">{fmt(calc.V, 2)} L</b></span>
+                  <span>Cỡ lô <b className="text-slate-800">{fmt(calc.ong, 0)} ống</b></span>
+                  {calc.streams.map((st, si) => (
+                    <span key={si}>NL {POOL_LABEL[streams[si].pool]}: <b className="text-slate-800">{fmt(st.reduce((sum, x) => sum + x.raw, 0), 2)} L</b>
+                      {st.some((x) => x.raw < x.lot.F - 1e-6) && <span className="text-amber-700"> (chai cuối dùng dở)</span>}</span>
+                  ))}
+                  {rules && calc.V > rules.maxV + 0.05 && <span className="text-rose-700 font-medium">⚠ Vượt cỡ lô tối đa {fmt(rules.maxV, 0)} L</span>}
+                  {rules && rules.minV > 0 && calc.V < rules.minV - 0.05 && <span className="text-rose-700 font-medium">⚠ Dưới cỡ lô tối thiểu {fmt(rules.minV, 0)} L</span>}
+                  {rules && lots.reduce((n, l) => n + l.length, 0) > rules.maxLots && <span className="text-rose-700 font-medium">⚠ Quá {rules.maxLots} chai/mẻ</span>}
+                  {rules?.oneLo && new Set(lots.flat().map((l) => l.loSanXuat)).size > 1 && <span className="text-rose-700 font-medium">⚠ Trộn nhiều lô — chỉ được dùng NL cùng 1 lô</span>}
+                  {streams.some((st, si) => calc.densities[si] < st.g * 0.99) && <span className="text-rose-700 font-medium">⚠ Mật độ thấp hơn đích — thêm chai hoặc giảm thể tích</span>}
+                  {streams.some((st, si) => calc.densities[si] > st.g * 1.05) && <span className="text-amber-700">{share ? "Mật độ cao hơn đích >5% — NL dư so với thể tích" : "Mật độ cao hơn đích >5% — pha đủ mẻ dùng hết chai nên mật độ bị đẩy cao"}</span>}
+                </div>
+              ) : (
+                <div className="text-xs text-slate-400 bg-slate-50 rounded-md px-3 py-2">{calc.reason}</div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {canEdit && (
+        <button onClick={() => setMes((prev) => [...prev, { ...newMe(), lockD: share }])} className="flex items-center gap-1 text-xs text-emerald-600 border border-emerald-200 rounded-md px-3 py-1.5 hover:bg-emerald-50">
+          <Plus className="w-3.5 h-3.5" /> Thêm mẻ
+        </button>
+      )}
+      {(() => {
+        const notReady = sims.map((x, i) => (x.calc.ok ? null : i + 1)).filter(Boolean);
+        return (
+          <div className="flex flex-wrap items-center gap-3 pt-3 border-t border-slate-100">
+            <button onClick={onCreate} disabled={!canEdit || notReady.length > 0}
+              className="flex items-center gap-2 bg-emerald-600 text-white text-sm px-4 py-2 rounded-md hover:bg-emerald-700 disabled:opacity-40">
+              <Calculator className="w-4 h-4" /> Tạo thông tin mẻ pha
+            </button>
+            {notReady.length > 0
+              ? <span className="text-xs text-amber-700">Mẻ {notReady.join(", ")} chưa đủ thông tin (chọn chai / nhập cỡ lô) nên chưa tạo được.</span>
+              : <span className="text-xs text-slate-500">Đủ {mes.length} mẻ — bấm để tạo bảng mẻ pha, rồi Duyệt.</span>}
+          </div>
+        );
+      })()}
+    </div>
+    </div>
+  );
+}
+
 /* ---------------- Pha chế SX (tự động theo thuật toán, xem trước + duyệt) ---------------- */
-function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, canPreview, role, userLabel }) {
+function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, canPreview, role, userLabel, mode = "sx" }) {
+  const isNcv = mode === "ncv"; // Pha chế GMP: NCV tự tick chai NL + nhập cỡ lô từng mẻ (xem planManualSingle/Two)
   const [maSP, setMaSP] = useState(products[0]?.maSP || "");
   const sp = products.find((p) => p.maSP === maSP) || products[0];
   // Cảnh báo va chạm chỉ áp dụng cho RD (người thật sự tạo kế hoạch pha) — admin/kh/qc/qa xem không
@@ -3064,6 +3369,13 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   // SP 2 thành phần (chốt NCV 2026-10-08): "tronChaiClausii" = chốt số chai clausii NGUYÊN VẸN gần N
   // nhất (mặc định, không dư clausii); "tronMePha" = pha đủ đúng N, chấp nhận dư lại 1 chai clausii dở.
   const [cheDo2TP, setCheDo2TP] = useState("tronChaiClausii");
+  // Pha chế GMP: danh sách mẻ do NCV tự dựng — mỗi mẻ tự gán chai NL (chai.a / chai.b = mã lô theo thứ tự
+  // thành phần 1 / 2 của SP), thể tích mẻ (chuỗi đang gõ) và 2 ô "cố định" thể tích / mật độ.
+  const newMe = () => ({ id: Date.now() + Math.random(), chai: { a: [], b: [] }, v: "", lockV: true, lockD: false });
+  const [mixMes, setMixMes] = useState(() => [newMe()]);
+  // "du" = pha đủ mẻ (tròn chai: chai nào vào mẻ nào thì dùng hết ở mẻ đó; cố định cỡ lô thì mật độ bị đẩy cao);
+  // "ghep" = pha ghép mẻ (1 chai chia dở cho nhiều mẻ, mật độ đúng đích khi cố định cả cỡ lô lẫn mật độ).
+  const [mixKieu, setMixKieu] = useState("du");
   const [plan, setPlan] = useState(null);
   const [batchOverrides, setBatchOverrides] = useState({}); // { [meSo]: V (L) do NCV tự chọn nới trần mẻ đó }
   // { [meSo]: true|false } — NCV tự ép có/không cần tiệt trùng trước mẻ đó, ghi đè quy tắc tự động
@@ -3095,6 +3407,8 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
     setGInput(sp?.hamLuong ? String(sp.hamLuong) : "");
     setGInput2(sp?.hamLuong2 ? String(sp.hamLuong2) : "");
     setWholeBottleOnly(false);
+    setMixMes([newMe()]);
+    setMixKieu("du");
     setPlan(null);
     setBatchOverrides({});
     setSterilizeOverrides({});
@@ -3161,11 +3475,35 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
   const tinhKeHoach = () => {
     if (!sp) return;
     const N = num(nInput);
-    if (!N || N <= 0) { setNote("Nhập số ống cần cho nhịp này trước đã."); return; }
+    if (!isNcv && (!N || N <= 0)) { setNote("Nhập số ống cần cho nhịp này trước đã."); return; }
     const G1 = num(gInput);
     if (!G1 || G1 <= 0) { setNote("Nhập hàm lượng đích (thành phần 1) trước đã."); return; }
     let result;
-    if (sp.pool2) {
+    if (isNcv) {
+      // Pha chế GMP: mỗi mẻ NCV tự gán chai NL + cố định thể tích/mật độ — hệ thống chỉ tính (xem planManualBatches).
+      const uniqLots = (lots) => [...new Map(lots.map((l) => [l.maLo, l])).values()];
+      const pick = (pool, ids) => { const all = poolLots(pool, sp.allowOtherLoai); return ids.map((id) => all.find((l) => l.maLo === id)).filter(Boolean); };
+      const mes = mixMes.map((m) => ({
+        lots: sp.pool2 ? [pick(sp.pool, m.chai.a), pick(sp.pool2, m.chai.b)] : [pick(sp.pool, m.chai.a)],
+        vL: num(m.v), lockV: m.lockV, lockD: m.lockD,
+      }));
+      if (sp.pool2) {
+        const G2 = num(gInput2);
+        if (!G2 || G2 <= 0) { setNote("Nhập hàm lượng đích (thành phần 2) trước đã."); return; }
+        const subFirst = sp.pool === "subtilis";
+        const gSubtilis = subFirst ? G1 : G2, gClausii = subFirst ? G2 : G1;
+        // calcManualMe/planManualBatches xếp luồng theo [subtilis, clausii]
+        const mesSC = mes.map((m) => ({ ...m, lots: subFirst ? m.lots : [m.lots[1], m.lots[0]] }));
+        result = planManualBatches({ kind: "two", product: { H: sp.tubeMl, gSubtilis, gClausii, rules: mixRulesOf(sp) }, mes: mesSC, share: mixKieu === "ghep" });
+        result._kind = "two"; result._mode = "manual"; result._gSubtilis = gSubtilis; result._gClausii = gClausii;
+        const used = (key) => uniqLots(mesSC.flatMap((m) => m.lots[key]));
+        result._subtilisPool = used(0); result._clausiiPool = used(1);
+      } else {
+        result = planManualBatches({ kind: "single", product: { G: G1, H: sp.tubeMl, rules: mixRulesOf(sp) }, mes, share: mixKieu === "ghep" });
+        result._kind = "single"; result._mode = "manual"; result._G = G1;
+        result._lotsPool = uniqLots(mes.flatMap((m) => m.lots[0]));
+      }
+    } else if (sp.pool2) {
       const G2 = num(gInput2);
       if (!G2 || G2 <= 0) { setNote("Nhập hàm lượng đích (thành phần 2) trước đã."); return; }
       const subFirst = sp.pool === "subtilis";
@@ -3173,7 +3511,8 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       const clausiiLots = poolLots(subFirst ? sp.pool2 : sp.pool, sp.allowOtherLoai);
       const gSubtilis = subFirst ? G1 : G2;
       const gClausii = subFirst ? G2 : G1;
-      result = planTwoComponent({ subtilisLots, clausiiLots, product: { N, H: sp.tubeMl, gSubtilis, gClausii }, mode: cheDo2TP });
+      const rules2 = mixRulesOf(sp);
+      result = planTwoComponent({ subtilisLots, clausiiLots, product: { N, H: sp.tubeMl, gSubtilis, gClausii }, mode: cheDo2TP, ...(rules2 ? { tankMaxL: rules2.maxV, maxLotsPerBatch: rules2.maxLots } : {}) });
       result._kind = "two";
       result._mode = cheDo2TP;
       result._gSubtilis = gSubtilis;
@@ -3183,12 +3522,15 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       result._clausiiPool = clausiiLots;
     } else {
       const lots = poolLots(sp.pool, sp.allowOtherLoai);
-      result = planSingleComponent({ lots, product: { N, G: G1, H: sp.tubeMl }, wholeBottleOnly });
+      const rules1 = mixRulesOf(sp);
+      result = planSingleComponent({ lots, product: { N, G: G1, H: sp.tubeMl }, wholeBottleOnly, batchRules: rules1 });
       result._kind = "single";
       result._G = G1;
       result._lotsPool = lots;
     }
-    result._N = N;
+    result._rules = mixRulesOf(sp);
+    // Pha chế GMP không bắt buộc nhập số ống cần — bỏ trống thì lấy đúng số ống ra làm mục tiêu.
+    result._N = N > 0 ? N : (result.T || 0);
     setPlan(result);
     setBatchOverrides({});
     setGhiChu("");
@@ -3210,7 +3552,8 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       summary.gClausii = plan._gClausii;
       summary.dSubtilis = plan.dSubtilis;
       summary.dClausii = plan.dClausii;
-      summary.cheDo = plan._mode === "tronMePha" ? "tròn mẻ pha (pha đủ lượng, chấp nhận dư clausii)" : "tròn chai clausii (không dư clausii)";
+      summary.cheDo = plan._mode === "manual" ? "NCV tự chọn chai NL và cỡ lô từng mẻ"
+        : plan._mode === "tronMePha" ? "tròn mẻ pha (pha đủ lượng, chấp nhận dư clausii)" : "tròn chai clausii (không dư clausii)";
       if (plan.subtilisShortfallLot) summary.subtilisShortfallLot = plan.subtilisShortfallLot;
       summary.batches = plan.batches.map((b) => ({
         meSo: b.meSo, tongTheTich: b.tongTheTich,
@@ -3316,7 +3659,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
     setEditBatches((prev) => {
       const next = structuredClone(prev);
       applyLotFEdit(next, key, maLo, meSo, newF, trueF);
-      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), TANK_MAX_L);
+      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), mixRulesOf(sp)?.maxV ?? TANK_MAX_L);
       return next;
     });
   };
@@ -3331,7 +3674,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       const existing = b?.[key]?.find((x) => x.maLo === maLo);
       const currentF = existing?.theTichRaw || 0;
       applyLotFEdit(next, key, maLo, meSo, currentF + amount, poolEntry.F, poolEntry.E);
-      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), TANK_MAX_L);
+      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), mixRulesOf(sp)?.maxV ?? TANK_MAX_L);
       return next;
     });
   };
@@ -3341,7 +3684,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       const next = structuredClone(prev);
       const b = next.find((x) => x.meSo === meSo);
       if (b) b._waterOverride = v;
-      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), TANK_MAX_L);
+      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), mixRulesOf(sp)?.maxV ?? TANK_MAX_L);
       return next;
     });
   };
@@ -3350,7 +3693,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
     setEditBatches((prev) => {
       const next = structuredClone(prev).filter((b) => b.meSo !== meSo);
       next.forEach((b, i) => { b.meSo = i + 1; });
-      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), TANK_MAX_L);
+      recomputeEditBatches(next, editIsTwo, gAOf(), gBOf(), mixRulesOf(sp)?.maxV ?? TANK_MAX_L);
       return next;
     });
   };
@@ -3466,7 +3809,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
             </select>
           </div>
           <div>
-            <label className="text-xs text-slate-500">Số ống cần cho nhịp này</label>
+            <label className="text-xs text-slate-500">{isNcv ? "Số ống cần (tuỳ chọn, để đối chiếu)" : "Số ống cần cho nhịp này"}</label>
             <GroupedIntInput value={nInput} onChange={setNInput} placeholder="vd 120.000"
               className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-40" />
           </div>
@@ -3489,7 +3832,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
                 className="block mt-1 border border-slate-300 rounded-md px-3 py-2 text-sm w-36" />
             </div>
           )}
-          {sp.pool2 && (
+          {sp.pool2 && !isNcv && (
             <div className="flex flex-col gap-1 text-sm text-slate-600 pb-1">
               <label className="flex items-center gap-2" title="Chốt số chai clausii NGUYÊN VẸN cho sản lượng gần N nhất — không dư clausii, số ống có thể lệch N theo cỡ chai">
                 <input type="radio" name="cheDo2TP" checked={cheDo2TP === "tronChaiClausii"} onChange={() => setCheDo2TP("tronChaiClausii")}
@@ -3503,17 +3846,17 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
               </label>
             </div>
           )}
-          {!sp.pool2 && (
+          {!sp.pool2 && !isNcv && (
             <label className="flex items-center gap-2 text-sm text-slate-600 pb-2" title="Mỗi lô NL tự thành 1 mẻ riêng, không ghép nhiều lô vào 1 mẻ">
               <input type="checkbox" checked={wholeBottleOnly} onChange={(e) => setWholeBottleOnly(e.target.checked)}
                 className="accent-emerald-600" />
               Pha tròn chai NL (không ghép mẻ)
             </label>
           )}
-          <button onClick={tinhKeHoach} disabled={!canPreview} title={!canPreview ? "Tài khoản của bạn không có quyền tính kế hoạch pha chế" : undefined}
+          {!isNcv && <button onClick={tinhKeHoach} disabled={!canPreview} title={!canPreview ? "Tài khoản của bạn không có quyền tính kế hoạch pha chế" : undefined}
             className="flex items-center gap-2 bg-emerald-600 text-white text-sm px-4 py-2 rounded-md hover:bg-emerald-700 disabled:opacity-40">
             <Calculator className="w-4 h-4" /> Tính kế hoạch
-          </button>
+          </button>}
         </div>
         <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
           {sp.pool2 ? (
@@ -3525,6 +3868,11 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           <span className="text-slate-400">(hàm lượng mặc định theo tab “Sản phẩm”, có thể sửa lại ở trên riêng cho nhịp này)</span>
         </div>
       </div>
+
+      {isNcv && (
+        <ManualMixBuilder sp={sp} poolLots={poolLots} mes={mixMes} setMes={setMixMes} newMe={newMe} kieu={mixKieu} setKieu={setMixKieu} onCreate={() => { tinhKeHoach(); setTimeout(() => document.getElementById("ncv-plan-result")?.scrollIntoView({ behavior: "smooth", block: "start" }), 250); }}
+          targets={sp.pool2 ? [num(gInput), num(gInput2)] : [num(gInput)]} canEdit={canEdit} />
+      )}
 
       {plan && !plan.feasible && (
         <div className="bg-rose-50 border border-rose-200 rounded-lg p-4 flex items-start gap-2 text-sm text-rose-700">
@@ -3543,7 +3891,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
       )}
 
       {plan && plan.feasible && (
-        <MixPlanResult
+        <div id="ncv-plan-result"><MixPlanResult
           plan={plan}
           sp={sp}
           batchOverrides={batchOverrides}
@@ -3551,7 +3899,7 @@ function MixPlanPanel({ materials, products, actorId, setNote, reload, canEdit, 
           sterilizeOverrides={sterilizeOverrides}
           onSterilizeToggle={canEdit ? toggleSterilize : undefined}
           onReorder={canEdit ? moveBatch : undefined}
-        />
+        /></div>
       )}
 
       {plan && plan.feasible && (
@@ -3856,7 +4204,8 @@ function EditableBatchCard({ b, isTwo, sp, gSubtilis, gClausii, gSingle, unalloc
     const cfu = (b[key] || []).reduce((s, e) => s + e.E * e.theTichRaw, 0) * 1000;
     if (cfu > 1e-6) vCapMax = Math.min(vCapMax, cfu / (1000 * g));
   });
-  vCapMax = Math.min(vCapMax, TANK_MAX_L);
+  const tankMax = mixRulesOf(sp)?.maxV ?? TANK_MAX_L; // cỡ lô tối đa riêng của sản phẩm (vd Baciforte 2000L), mặc định trần tank
+  vCapMax = Math.min(vCapMax, tankMax);
 
   // Draft cục bộ — giá trị NCV ĐANG GÕ (chưa commit lên state chung của cả kế hoạch): dùng để hiện
   // MẬT ĐỘ THÀNH PHẨM cập nhật NGAY LẬP TỨC theo từng phím gõ, KHÔNG phải chờ blur hay chạy lại toàn
@@ -4085,6 +4434,13 @@ function explainTubeCount(plan, sp, isTwo) {
   const out = [];
   out.push({ kind: "head", text: `Mục tiêu ${fmt(N, 0)} ống → kế hoạch ra ${fmt(T, 0)} ống (${fmt(pct, 1)}%, ${diff >= 0 ? "dư" : "thiếu"} ${fmt(Math.abs(diff), 0)} ống).` });
 
+  if (plan._mode === "manual") {
+    out.push({ text: `Pha chế GMP: số ống = tổng thể tích các mẻ × 1000 ÷ thể tích 1 ống = ${fmt(plan.totalV, 1)} L × 1000 ÷ ${H} ml = ${fmt(T, 0)} ống. Mỗi mẻ do bạn tự gán chai NL; số ống chỉ do thể tích từng mẻ quyết định.` });
+    out.push({ text: `Mỗi mẻ: ${plan.batches.map((b) => `mẻ ${b.meSo} = ${fmt(b.tongTheTich, 1)} L (${fmt(Math.floor((b.tongTheTich * 1000) / H), 0)} ống)`).join("; ")}.` });
+    out.push({ kind: "reason", text: `Tích "Cố định cỡ lô" thì thể tích do bạn nhập và mật độ tính theo NL của chai đã gán; tích "Cố định mật độ" thì NL (hoặc thể tích) tính theo đúng mật độ đích. Muốn đổi số ống: sửa thể tích mẻ, hoặc gán thêm/bớt chai cho mẻ.` });
+    return out;
+  }
+
   if (!isTwo) {
     const G = plan._G;
     const pool = plan._lotsPool || [];
@@ -4153,13 +4509,28 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
     const wasteClau = (plan.dClausii / plan._gClausii - 1) * 100;
     if (wasteSub > 3) warnings.push(`Mật độ subtilis dư ${fmt(wasteSub, 1)}% so với đích.`);
     if (wasteClau > 3) warnings.push(`Mật độ clausii dư ${fmt(wasteClau, 1)}% so với đích.`);
+    if (wasteSub < -1) warnings.push(`⚠ Mật độ subtilis THẤP hơn đích ${fmt(-wasteSub, 1)}% — NL đã tick không đủ cho tổng cỡ lô các mẻ.`);
+    if (wasteClau < -1) warnings.push(`⚠ Mật độ clausii THẤP hơn đích ${fmt(-wasteClau, 1)}% — NL đã tick không đủ cho tổng cỡ lô các mẻ.`);
   } else {
     const waste = (plan.d / plan._G - 1) * 100;
     if (waste > 3) warnings.push(`Mật độ pha dư ${fmt(waste, 1)}% so với đích.`);
+    if (waste < -1) warnings.push(`⚠ Mật độ pha THẤP hơn đích ${fmt(-waste, 1)}% — NL đã tick không đủ cho tổng cỡ lô các mẻ.`);
   }
   plan.batches.forEach((b) => {
-    if (b.tongTheTich >= TANK_MAX_L * 0.95) warnings.push(`Mẻ ${b.meSo} gần chạm trần tank (${fmt(b.tongTheTich, 1)}L).`);
+    if (b.tongTheTich >= (plan._rules?.maxV ?? TANK_MAX_L) * 0.95) warnings.push(`Mẻ ${b.meSo} gần chạm trần tank (${fmt(b.tongTheTich, 1)}L).`);
   });
+  if (plan.leftoverLots?.length) warnings.push(`Để lại ${plan.leftoverLots.length} chai NL chưa dùng (${plan.leftoverLots.join(", ")}) cho gọn mẻ — vẫn ở Chờ pha, dùng được cho sản phẩm khác.`);
+  // Quy tắc mẻ riêng của sản phẩm (vd Baciforte: ≤2000L, ≥1000L, ≤3 chai/mẻ, cùng 1 lô) — kiểm từng mẻ.
+  const ru = plan._rules;
+  if (ru) {
+    plan.batches.forEach((b) => {
+      const nLots = isTwo ? b.subtilis.length + b.clausii.length : b.lots.length;
+      if (ru.minV > 0 && b.tongTheTich < ru.minV - 0.05) warnings.push(`⚠ Mẻ ${b.meSo} chỉ ${fmt(b.tongTheTich, 1)}L — dưới mức tối thiểu ${fmt(ru.minV, 0)}L của sản phẩm.`);
+      if (b.tongTheTich > ru.maxV + 0.05) warnings.push(`⚠ Mẻ ${b.meSo} ${fmt(b.tongTheTich, 1)}L — vượt cỡ lô tối đa ${fmt(ru.maxV, 0)}L của sản phẩm.`);
+      if (nLots > ru.maxLots) warnings.push(`⚠ Mẻ ${b.meSo} dùng ${nLots} chai — vượt tối đa ${ru.maxLots} chai/mẻ của sản phẩm.`);
+      if (ru.oneLo && b.tronLoSanXuat) warnings.push(`⚠ Mẻ ${b.meSo} trộn NL của nhiều lô sản xuất — sản phẩm chỉ được dùng NL cùng 1 lô.`);
+    });
+  }
   // Cảnh báo MẬT ĐỘ TỪNG MẺ riêng (khác cảnh báo mật độ TRUNG BÌNH CẢ NHỊP ở trên) — thuật toán hiện
   // tại không còn tạo ra mẻ dư mật độ nặng, nhưng kế hoạch SỬA TAY thì vẫn có thể — 1 mẻ lệch nặng có
   // thể bị che bởi mật độ trung bình cả nhịp, nên vẫn kiểm riêng từng mẻ.
@@ -4207,7 +4578,7 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
   }
   const selfMixedBatches = plan.batches.filter((b) => b.tronLoSanXuat).map((b) => b.meSo);
   if (selfMixedBatches.length) warnings.push(`Mẻ ${selfMixedBatches.join(", ")} dùng NL từ ≥2 lô sản xuất khác nhau của cùng 1 chủng trong cùng 1 tank.`);
-  const tronChaiClausii = isTwo && plan._mode !== "tronMePha";
+  const tronChaiClausii = isTwo && plan._mode !== "tronMePha" && plan._mode !== "manual";
   if (tronChaiClausii && plan.T > 1.05 * plan._N) {
     warnings.push(`Sản lượng dư ${fmt((plan.T / plan._N - 1) * 100, 0)}% so với mục tiêu (${fmt(plan._N, 0)} ống) — do cỡ chai clausii: đây là số chai clausii NGUYÊN VẸN cho sản lượng gần mục tiêu nhất (bớt 1 chai sẽ hụt nhiều hơn mức dư hiện tại; clausii không được dùng dở). Xem kỹ rồi quyết định pha theo kế hoạch này hay điều chỉnh lại đơn.`);
   } else if (plan.T > 1.05 * plan._N) {
@@ -4289,8 +4660,10 @@ function MixPlanResult({ plan, sp, batchOverrides = {}, onOverrideChange, steril
         ) : (
           <PassRow label="Bảo toàn bào tử" pass={plan.massBalance.pass} detail={`chênh ${fmt(plan.massBalance.diffPct, 3)}%`} />
         )}
-        <PassRow label={`Mỗi mẻ ≤ ${TANK_MAX_L}L`} pass={plan.batches.every((b) => b.tongTheTich <= TANK_MAX_L + 1e-6)} />
-        <PassRow label={`Mỗi mẻ ≤ ${MAX_LOTS_PER_BATCH} lô`} pass={plan.batches.every((b) => (isTwo ? b.subtilis.length + b.clausii.length : b.lots.length) <= MAX_LOTS_PER_BATCH)} />
+        <PassRow label={`Mỗi mẻ ≤ ${plan._rules?.maxV ?? TANK_MAX_L}L`} pass={plan.batches.every((b) => b.tongTheTich <= (plan._rules?.maxV ?? TANK_MAX_L) + 1e-6)} />
+        <PassRow label={`Mỗi mẻ ≤ ${plan._rules?.maxLots ?? MAX_LOTS_PER_BATCH} lô`} pass={plan.batches.every((b) => (isTwo ? b.subtilis.length + b.clausii.length : b.lots.length) <= (plan._rules?.maxLots ?? MAX_LOTS_PER_BATCH))} />
+        {plan._rules?.minV > 0 && <PassRow label={`Mỗi mẻ ≥ ${plan._rules.minV}L`} pass={plan.batches.every((b) => b.tongTheTich >= plan._rules.minV - 0.05)} />}
+        {plan._rules?.oneLo && <PassRow label="Mỗi mẻ chỉ dùng NL cùng 1 lô" pass={plan.batches.every((b) => !b.tronLoSanXuat)} />}
         <PassRow
           label={`Số ống đạt tối thiểu 90% mục tiêu (${fmt(plan._N, 0)})`}
           pass={plan.T >= 0.9 * plan._N}
@@ -4865,7 +5238,7 @@ function ProductPanel({ products, setProducts, setNote, isAdmin, canEdit }) {
       <div className="overflow-x-auto">
         <table className="w-full text-xs whitespace-nowrap">
           <thead className="bg-slate-50 text-slate-400 text-left">
-            <tr>{[...(isAdmin ? [""] : []), "Mã SP","Tên","Thành phần","Nguồn NL","Hàm lượng (cfu/ml)","Dùng loại khác dự phòng","Ống (ml)","Ống/nhịp","Mã hóa thân ống","NCV",""].map((h,i)=><th key={i} className="px-3 py-2 font-medium">{h}</th>)}</tr>
+            <tr>{[...(isAdmin ? [""] : []), "Mã SP","Tên","Thành phần","Nguồn NL","Hàm lượng (cfu/ml)","Dùng loại khác dự phòng","Ống (ml)","Ống/nhịp","Mã hóa thân ống","Quy tắc mẻ","NCV",""].map((h,i)=><th key={i} className="px-3 py-2 font-medium">{h}</th>)}</tr>
           </thead>
           <tbody>
             {products.map((p, i) => {
@@ -4907,6 +5280,7 @@ function ProductPanel({ products, setProducts, setNote, isAdmin, canEdit }) {
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.tubeMl} on={(v) => edit(i, "tubeMl", v)} w="w-14" disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.soOngNhip} on={(v) => edit(i, "soOngNhip", v)} w="w-20" disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.maHoaThanOng} on={(v) => edit(i, "maHoaThanOng", v)} w="w-24" disabled={!canEdit} /></td>
+                    <td rowSpan={rows} className="px-2 py-1 align-top"><MeRulesCell value={p.quyTacMe} onChange={(v) => edit(i, "quyTacMe", v)} disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-2 py-1 align-top"><EditText v={p.ncv} on={(v) => edit(i, "ncv", v)} w="w-20" disabled={!canEdit} /></td>
                     <td rowSpan={rows} className="px-3 py-1.5 text-right align-top">
                       {canEdit && (
