@@ -428,6 +428,200 @@ export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_
   });
 }
 
+// ---------------------------------------------------------------------------
+// SP 1 THÀNH PHẦN VỚI QUY TẮC MẺ RIÊNG (vd Baciforte)
+// ---------------------------------------------------------------------------
+//
+// Một số sản phẩm có quy tắc mẻ riêng thay cho mặc định (tank 1080L, ≤3 chai/mẻ, được ghép lô, mẻ ≥700L):
+//   rules = { maxV: cỡ lô tối đa (L), minV: cỡ lô tối thiểu (L), maxLots: tối đa chai/mẻ, oneLo: chỉ dùng NL
+//   của CÙNG 1 lô sản xuất trong 1 mẻ }.
+// Chốt NCV 2026-10-27 cho Baciforte: tối đa 2000L, ≤3 chai/mẻ, cùng 1 lô, không mẻ nào dưới 1000L.
+// Mỗi lô sản xuất được chia mẻ riêng bằng quy hoạch động (cắt tại ranh giới chai + từng bước 0.5L): ưu tiên
+// (1) không vượt maxV / maxLots, (2) không mẻ < minV, (3) không mẩu NL vụn < 1L, (4) ÍT mẻ nhất (mẻ càng
+// to càng tốt), (5) ít chai bị tách đôi. Lô nào tổng thể tích không đủ minV thì vẫn tạo mẻ (không bỏ NL)
+// nhưng mẻ đó dưới minV — App.jsx cảnh báo.
+
+function segmentSingleStream(lots, G, H, { minV, maxV, maxLots }) {
+  const segs = layoutLots(lots, G);
+  const V = segs.length ? segs[segs.length - 1].end : 0;
+  if (!(V > 0)) return [];
+  const raw = [0, V];
+  segs.forEach((sg) => {
+    raw.push(sg.end);
+    const step = RAW_ROUND_STEP_L / sg.k;
+    for (let t = sg.start + step; t < sg.end - EPS; t += step) raw.push(t);
+  });
+  raw.sort((a, b) => a - b);
+  const xs = [];
+  raw.forEach((x) => { if (x - (xs.length ? xs[xs.length - 1] : -1) > 1e-4) xs.push(x); });
+  if (xs[0] > 1e-4) xs.unshift(0);
+  const n = xs.length;
+  const pos = xs.map((x, idx) => roundedPosition(segs, x, idx === n - 1, ceilToStep));
+  const eval1 = (i, j) => {
+    let vol = 0, cnt = 0, pen = 0;
+    for (let a = pos[i].i, last = Math.min(pos[j].i, segs.length - 1); a <= last; a++) {
+      const lot = segs[a].lot;
+      const r = (a === pos[j].i ? pos[j].r : lot.F) - (a === pos[i].i ? pos[i].r : 0);
+      if (r <= EPS) continue;
+      vol += (lot.E * r) / G;
+      cnt++;
+      if (r < lot.F - EPS) pen += r < MIN_LOT_FRAGMENT_L - EPS ? COST_PER_SPLIT + COST_FRAGMENT : COST_PER_SPLIT;
+    }
+    if (!cnt) return null;
+    let c = COST_PER_BATCH + pen;
+    if (vol > maxV + EPS) c += COST_INVALID;
+    if (cnt > maxLots) c += COST_PER_EXTRA_LOT * (cnt - maxLots);
+    if (vol < minV - EPS) c += COST_BELOW_MIN + (minV - vol) * 5;
+    return { c, vol };
+  };
+  const dp = new Array(n).fill(Infinity), prev = new Array(n).fill(-1);
+  dp[0] = 0;
+  for (let j = 1; j < n; j++) {
+    for (let i = j - 1; i >= 0; i--) {
+      if (xs[j] - xs[i] > maxV * 1.03 + 1) break;
+      if (dp[i] === Infinity) continue;
+      const e = eval1(i, j);
+      if (!e) continue;
+      if (dp[i] + e.c < dp[j]) { dp[j] = dp[i] + e.c; prev[j] = i; }
+    }
+  }
+  if (dp[n - 1] === Infinity) return null;
+  const out = [];
+  for (let j = n - 1; j > 0; j = prev[j]) {
+    const i = prev[j];
+    const entries = portionsBetween(segs, pos[i], pos[j]).map((p) => {
+      const theTichDich = (p.seg.lot.E * p.raw) / G;
+      return { maLo: p.seg.lot.maLo, E: p.seg.lot.E, theTichRaw: p.raw, theTichDich, soOng: (theTichDich * 1000) / H, loSanXuat: p.seg.lot.loSanXuat };
+    });
+    const vol = entries.reduce((sum, e) => sum + e.theTichDich, 0);
+    const loList = Array.from(new Set(entries.map((e) => loSanXuatOf(e))));
+    out.push({ tongTheTich: vol, tronLoSanXuat: loList.length > 1, loSanXuatList: loList, lots: entries });
+  }
+  return out.reverse();
+}
+
+/** Quy tắc "dùng hết chai" (wholeBottle, vd Baciforte): mỗi chai dùng trọn 100% trong ĐÚNG 1 mẻ, không chia dở
+ * cho mẻ sau. Cắt dãy chai (theo thứ tự cũ → mới) thành các nhóm liên tiếp ≤ maxLots chai; thể tích mẻ =
+ * tổng thể tích pha của các chai ở đúng mật độ đích. Mẻ lý tưởng nằm trong [goodMin, goodMax]; vượt goodMax
+ * (tới maxV) vẫn chấp nhận (phạt nhẹ); dưới minV chỉ khi không còn cách nào (phạt rất nặng). */
+function partitionWholeBottles(lots, G, H, { minV, maxV, maxLots, goodMin, goodMax, perBatch = COST_PER_BATCH, missingPenalty = 0 }) {
+  const n = lots.length;
+  const cap = lots.map((l) => (l.E * l.F) / G);
+  const groupCost = (a, b) => {
+    const v = cap.slice(a, b).reduce((sum, x) => sum + x, 0);
+    if (v > maxV + EPS) return null;
+    let c = perBatch + (maxLots - (b - a)) * missingPenalty; // mỗi chai thiếu so với đủ maxLots/mẻ bị phạt nhẹ -> ưu tiên mẻ đủ 3 chai
+    if (v < minV - EPS) c += COST_BELOW_MIN * 100 + (minV - v) * 5;
+    else if (v < goodMin) c += (goodMin - v) * 0.5;
+    else if (v > goodMax) c += (v - goodMax) * 0.05;
+    return c;
+  };
+  const dp = new Array(n + 1).fill(Infinity), prev = new Array(n + 1).fill(-1);
+  dp[0] = 0;
+  for (let j = 1; j <= n; j++) {
+    for (let k = 1; k <= Math.min(maxLots, j); k++) {
+      const c = groupCost(j - k, j);
+      if (c == null || dp[j - k] === Infinity) continue;
+      if (dp[j - k] + c < dp[j]) { dp[j] = dp[j - k] + c; prev[j] = j - k; }
+    }
+  }
+  if (dp[n] === Infinity) {
+    // 1 chai đơn lẻ đã vượt maxV (hiếm) — mỗi chai 1 mẻ, để App cảnh báo vượt trần.
+    return { groups: lots.map((l) => [l]), cost: 1e9 };
+  }
+  const out = [];
+  for (let j = n; j > 0; j = prev[j]) out.push(lots.slice(prev[j], j));
+  return { groups: out.reverse(), cost: dp[n] };
+}
+
+// Sản phẩm "dùng hết chai": số MẺ ÍT NHẤT là ưu tiên số 1 (tiết kiệm nhân công) -> mỗi mẻ trả giá rất cao so với
+// mọi tiêu chí còn lại (cỡ lô lý tưởng, độ sát N).
+const WHOLE_COST_PER_BATCH = 10000;
+// Sản phẩm "dùng hết chai" được phép ra sản lượng THẤP hơn N tới mức này (đổi lại ít mẻ hơn, chai lẻ để pha sản phẩm khác).
+const WHOLE_MIN_FRACTION = 0.85;
+
+/** Sản phẩm "dùng hết chai" (vd Baciforte, chốt NCV 2026-10-28): chọn các chai để pha ra sản lượng ≈ N với ÍT MẺ
+ * NHẤT — mỗi mẻ ghép tối đa maxLots chai cùng lô, cỡ lô sát trần. Chai nào "lẻ" (không ghép đủ mẻ đẹp) thì ĐỂ LẠI
+ * (không dùng), pha sản phẩm khác. Mỗi lô dùng 1 đoạn chai CŨ NHẤT liên tiếp (FIFO), quy hoạch động chọn số chai dùng
+ * ở từng lô sao cho tổng thể tích nằm trong [85%, 115%] mục tiêu mà tổng chi phí (chủ yếu số mẻ) thấp nhất —
+ * mỗi 1% thiếu so với N chỉ "đáng" 1/10 mẻ nên thuật toán sẵn sàng thiếu vài % để bớt hẳn 1 mẻ.
+ * Trả về { keep, omit (chỉ số trong sortedLots), sum (E×F) } hoặc null nếu không đạt 85% N. */
+function chooseWholeBottleLots(sortedLots, target, G, H, rules) {
+  const r = { ...rules, goodMin: rules.goodMin ?? rules.minV, goodMax: rules.goodMax ?? rules.maxV, perBatch: WHOLE_COST_PER_BATCH, missingPenalty: 4000 };
+  const groups = rules.oneLo ? groupByLoSanXuat(sortedLots) : [{ lots: sortedLots }];
+  const Vt = target / G; // thể tích pha mục tiêu (L)
+  const capOf = (l) => (l.E * l.F) / G;
+  const opts = groups.map((g) => {
+    const arr = [{ k: 0, v: 0, cost: 0 }];
+    let v = 0;
+    for (let k = 1; k <= g.lots.length; k++) {
+      v += capOf(g.lots[k - 1]);
+      if (v > Vt * 1.15) break; // dùng quá nhiều so với mục tiêu — không xét tiếp
+      arr.push({ k, v, cost: partitionWholeBottles(g.lots.slice(0, k), G, H, r).cost });
+    }
+    return arr;
+  });
+  const BIN = 5;
+  let dp = new Map([[0, { cost: 0, v: 0, picks: [] }]]);
+  opts.forEach((arr) => {
+    const next = new Map();
+    for (const [bin, st] of dp) {
+      for (const o of arr) {
+        const nv = st.v + o.v;
+        if (nv > Vt * 1.15) continue;
+        const nb = bin + Math.round(o.v / BIN);
+        const cost = st.cost + o.cost;
+        const cur = next.get(nb);
+        if (!cur || cost < cur.cost - 1e-9) next.set(nb, { cost, v: nv, picks: [...st.picks, o.k] });
+      }
+    }
+    dp = next;
+  });
+  let best = null;
+  for (const st of dp.values()) {
+    if (st.v < Vt * WHOLE_MIN_FRACTION - EPS || !st.picks.some((k) => k > 0)) continue;
+    const dev = (st.v - Vt) / Vt;
+    const score = st.cost + (dev >= 0 ? dev * 30000 : -dev * 100000);
+    if (!best || score < best.score) best = { score, picks: st.picks };
+  }
+  if (!best) return null;
+  const keep = [], omit = [];
+  let base = 0;
+  groups.forEach((g, gi) => {
+    g.lots.forEach((lot, i) => {
+      const idx = sortedLots.indexOf(lot);
+      if (i < best.picks[gi]) keep.push(lot); else omit.push(idx);
+    });
+    base += g.lots.length;
+  });
+  const sum = keep.reduce((acc, l) => acc + l.E * l.F, 0);
+  return { keep, omit, sum };
+}
+
+function packSingleWithRules(selectedLots, G, H, rules) {
+  const ordered = [...selectedLots].sort(fifoCompare);
+  const groups = rules.oneLo ? groupByLoSanXuat(ordered) : [{ loSanXuat: null, lots: ordered }];
+  const batches = [];
+  for (const g of groups) {
+    if (rules.wholeBottle) {
+      const r = { ...rules, goodMin: rules.goodMin ?? rules.minV, goodMax: rules.goodMax ?? rules.maxV, perBatch: WHOLE_COST_PER_BATCH, missingPenalty: 4000 };
+      for (const part of partitionWholeBottles(g.lots, G, H, r).groups) {
+        const entries = part.map((l) => {
+          const theTichDich = (l.E * l.F) / G;
+          return { maLo: l.maLo, E: l.E, theTichRaw: l.F, theTichDich, soOng: (theTichDich * 1000) / H, loSanXuat: l.loSanXuat };
+        });
+        const loList = Array.from(new Set(part.map((l) => loSanXuatOf(l))));
+        batches.push({ tongTheTich: entries.reduce((sum, e) => sum + e.theTichDich, 0), tronLoSanXuat: loList.length > 1, loSanXuatList: loList, lots: entries });
+      }
+      continue;
+    }
+    const part = segmentSingleStream(g.lots, G, H, rules);
+    if (part) batches.push(...part);
+  }
+  batches.forEach((b, i) => { b.meSo = i + 1; });
+  return batches;
+}
+
 /**
  * Lập kế hoạch mẻ pha cho sản phẩm 1 thành phần hoạt chất.
  * @param {{maLo:string,E:number,F:number}[]} lots - các lô đang "Chờ pha" (đã qua KQKN, đạt) của đúng chủng.
@@ -436,15 +630,25 @@ export function packSingleStreamBatches(selectedLots, d, H, tankMaxL = TANK_MAX_
  *   ghép/tách qua nhiều mẻ (xem packWholeBottleBatches). Chỉ đổi cách ĐÓNG mẻ, không đổi cách CHỌN
  *   lô (vẫn FIFO như bình thường tới khi đủ N).
  */
-export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH, wholeBottleOnly = false }) {
+export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxLotsPerBatch = MAX_LOTS_PER_BATCH, wholeBottleOnly = false, batchRules = null }) {
   const { N, G, H } = product;
   const target = (N * G * H) / 1000; // mốc dừng FIFO — mật độ luôn dùng đúng G, không dò d cao hơn
-  const vMin = (TUBE_TOL_LOW * N * G * H) / 1000; // sàn khả thi tối thiểu (90% đơn)
+  const vMin = ((batchRules?.wholeBottle ? WHOLE_MIN_FRACTION : TUBE_TOL_LOW) * N * G * H) / 1000; // sàn khả thi tối thiểu (90% đơn; "dùng hết chai" 85%)
 
   // FIFO: dùng NL cũ nhất trước, dừng khi vừa chạm mục tiêu N (không cắt bớt nếu lô cuối vượt
   // qua — số ống có thể nhỉnh hơn N, kể cả vượt +10%, NCV xem rồi tự quyết định dùng hết hay bớt).
   const fifo = selectLotsFifo(lots, target);
-  const best = fifo ? { ...fifo, ...densityAndTubes(fifo.sumValue, { H, G }) } : null;
+  let best = fifo ? { ...fifo, ...densityAndTubes(fifo.sumValue, { H, G }) } : null;
+  // "Dùng hết chai": được để lại tối đa 2 chai NL (pha sản phẩm khác) nếu nhờ đó các mẻ gọn hơn.
+  let leftoverLots = [];
+  if (best && batchRules?.wholeBottle) {
+    const sortedAll = [...lots].sort(fifoCompare);
+    const alt = chooseWholeBottleLots(sortedAll, target, G, H, batchRules);
+    if (alt) {
+      best = { subset: alt.keep, sumValue: alt.sum, ...densityAndTubes(alt.sum, { H, G }) };
+      leftoverLots = alt.omit.map((i) => sortedAll[i]).filter(Boolean);
+    }
+  }
 
   if (!best || best.sumValue < vMin - EPS) {
     // maxOng: số ống tối đa pha được nếu dùng HẾT kho hiện có ở đúng mật độ đích G — để NCV thấy
@@ -454,7 +658,9 @@ export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxL
     return { feasible: false, maxOng, reason: "Kho hiện có (đã qua KQKN, ở Chờ pha) không đủ nguyên liệu để đạt tối thiểu 90% số ống cần — cần NCV bổ sung nguyên liệu hoặc điều chỉnh đơn." };
   }
 
-  const batches = wholeBottleOnly
+  const batches = batchRules
+    ? packSingleWithRules(best.subset, G, H, batchRules)
+    : wholeBottleOnly
     ? packWholeBottleBatches(best.subset, G, H, tankMaxL)
     : packSingleStreamBatches(best.subset, best.d, H, tankMaxL, maxLotsPerBatch);
   const massBalance = checkMassBalance(best.subset, best.d, best.T, H);
@@ -466,6 +672,7 @@ export function planSingleComponent({ lots, product, tankMaxL = TANK_MAX_L, maxL
     S: best.S,
     totalV: best.sumValue / best.d,
     wholeBottleOnly,
+    leftoverLots: leftoverLots.map((l) => l.maLo),
     selectedLots: best.subset.map((l) => l.maLo),
     batches,
     massBalance,
@@ -992,6 +1199,170 @@ function recomputeLoSanXuatMeta(batches) {
     b.clausiiLoSanXuatList = Array.from(new Set(b.clausii.map(loSanXuatOf)));
   });
 }
+
+// ---------------------------------------------------------------------------
+// PHA CHẾ NCV — NCV TỰ GÁN CHAI NL CHO TỪNG MẺ (không có thuật toán tự chia mẻ)
+// ---------------------------------------------------------------------------
+//
+// Chốt với NCV 2026-10-22: ở tab "Pha chế GMP", NCV tự quyết "mẻ nào dùng chai nào" (vd 3 mẻ, mỗi mẻ 1
+// chai) rồi tick CỐ ĐỊNH chỉ tiêu nào là đầu vào, chỉ tiêu còn lại hệ thống chỉ việc tính ra:
+//   - cố định thể tích mẻ (cỡ lô), mật độ nhảy:   dùng HẾT các chai đã gán, mật độ = tổng bào tử ÷ thể tích.
+//   - cố định cả thể tích lẫn mật độ:             lấy vừa đủ NL (chai cuối dùng dở, đong tròn 0.5L), thiếu thì báo.
+//   - cố định mật độ, thể tích nhảy:              thể tích = lượng NL đã gán đủ pha ở mật độ đích
+//                                                   (SP 2 thành phần: theo chủng ít hơn, chủng kia dùng dở).
+// Một mẻ chỉ là 1 phép tính độc lập trên đúng các chai NCV gán cho nó.
+
+/** Tính 1 mẻ NCV tự gán chai.
+ * me = { lots: [lotsStream0, lotsStream1?], vL, lockV, lockD }, cfg = { H, targets: [g0, g1?] }.
+ * Trả về { ok, reason } hoặc { ok:true, V, ong, streams: [[{lot, raw}]], densities, caps }. */
+export function calcManualMe(me, cfg) {
+  const { H, targets } = cfg;
+  const lotsArr = targets.map((_, i) => [...(me.lots[i] || [])].sort(fifoCompare));
+  if (lotsArr.some((l) => !l.length)) return { ok: false, reason: "Chưa chọn chai NL cho mẻ này." };
+  // Quy tắc mẻ riêng của sản phẩm (vd Baciforte) là CỨNG ở Pha chế GMP: không trộn lô, không quá số chai.
+  const allLots = lotsArr.flat();
+  if (cfg.rules?.oneLo) {
+    const los = [...new Set(allLots.map(loSanXuatOf))];
+    if (los.length > 1) return { ok: false, reason: `Không được trộn lô: mẻ này đang có chai của ${los.length} lô (${los.join(", ")}) — chỉ được dùng NL cùng 1 lô.` };
+  }
+  if (cfg.rules?.maxLots && allLots.length > cfg.rules.maxLots) return { ok: false, reason: `Quá ${cfg.rules.maxLots} chai/mẻ (đang ${allLots.length} chai).` };
+  const caps = lotsArr.map((ls, i) => ls.reduce((sum, l) => sum + l.E * l.F, 0) / targets[i]); // L pha ở mật độ đích
+  let V;
+  if (me.lockV) {
+    V = me.vL;
+    if (!(V > 0)) return { ok: false, reason: "Nhập thể tích (L) hoặc cỡ lô (ống) của mẻ." };
+  } else {
+    V = Math.floor(Math.min(...caps) * 100) / 100;
+  }
+  const useAll = me.lockV && !me.lockD; // mật độ nhảy theo thể tích -> dùng hết mọi chai đã gán
+  const streams = [];
+  for (let i = 0; i < lotsArr.length; i++) {
+    if (useAll) { streams.push(lotsArr[i].map((lot) => ({ lot, raw: lot.F }))); continue; }
+    if (V > caps[i] + RAW_ROUND_STEP_L) {
+      return { ok: false, reason: `Chai đã chọn chỉ đủ pha ${caps[i].toFixed(1)} L ở mật độ đích, thiếu ${(V - caps[i]).toFixed(1)} L so với ${V.toFixed(1)} L — chọn thêm chai hoặc giảm thể tích mẻ.` };
+    }
+    let need = V * targets[i]; // CFU/1000: tổng E×raw cần
+    const out = [];
+    for (const lot of lotsArr[i]) {
+      if (need <= 1e-9) break;
+      const raw = Math.min(lot.F, ceilToStep(need / lot.E));
+      out.push({ lot, raw });
+      need -= lot.E * raw;
+    }
+    streams.push(out);
+  }
+  const densities = streams.map((st) => st.reduce((sum, x) => sum + x.lot.E * x.raw, 0) / V);
+  return { ok: true, V, ong: Math.floor((V * 1000) / H), streams, densities, caps };
+}
+
+/** Gợi ý tổ hợp chai NL (tối đa maxBottles chai) hợp với 1 mẻ thể tích V ở mật độ đích g — NCV tự tick chọn
+ * trong các gợi ý. Trả về [{ lots, capV, dens, partial }] tốt nhất trước.
+ * mode "du" (pha đủ mẻ = tròn chai): chỉ tổ hợp dùng HẾT chai, mật độ ra ≥ đích −1% (cố định cỡ lô thì
+ *   chấp nhận mật độ bị đẩy cao) — xếp theo mật độ thấp nhất, ít chai, chai cũ trước.
+ * mode "ghep" (pha ghép mẻ): chai được dùng dở, phần dư chuyển sang mẻ sau; ưu tiên ÍT chai, chai đang dùng
+ *   dở (lot.carry) và chai cũ trước — partial: true khi phải lấy 1 phần chai (mật độ đúng đích). */
+export function suggestManualLots(lots, g, V, { maxBottles = 3, maxCands = 4, mode = "du", sameLo = false } = {}) {
+  if (!(V > 0) || !(g > 0)) return [];
+  const ordered = [...lots].sort(fifoCompare).slice(0, 30);
+  const cap = ordered.map((l) => (l.E * l.F) / g);
+  const cands = [];
+  const rec = (start, picked, sum, ageSum) => {
+    if (picked.length) {
+      const dens = sum / V - 1;
+      if (dens >= -0.01 && (mode === "ghep" ? dens <= 1.5 : dens <= 0.6)) {
+        const carry = picked.some((i) => ordered[i].carry);
+        const partial = mode === "ghep" && dens > 0.0005;
+        const score = mode === "ghep"
+          ? (picked.length - 1) * 10 + ageSum * 0.02 - (carry ? 5 : 0) + dens
+          : dens * 100 + (picked.length - 1) * 0.5 + ageSum * 0.02;
+        cands.push({ lots: picked.map((i) => ordered[i]), capV: sum, dens, partial, score });
+      }
+    }
+    if (picked.length >= maxBottles || sum > V * (mode === "ghep" ? 2.5 : 1.6)) return;
+    for (let i = start; i < ordered.length; i++) {
+      if (sameLo && picked.length && loSanXuatOf(ordered[i]) !== loSanXuatOf(ordered[picked[0]])) continue;
+      rec(i + 1, [...picked, i], sum + cap[i], ageSum + i);
+    }
+  };
+  rec(0, [], 0, 0);
+  cands.sort((a, b) => a.score - b.score);
+  return cands.slice(0, maxCands).map(({ score, ...c }) => c);
+}
+
+/** Kế hoạch từ các mẻ NCV tự gán. kind "single": product {G,H}, me.lots = [lots]. kind "two": product
+ * {gSubtilis,gClausii,H}, me.lots = [subtilisLots, clausiiLots]. */
+export function planManualBatches({ kind, product, mes, share = false }) {
+  const { H } = product;
+  const two = kind === "two";
+  const cfg = { H, targets: two ? [product.gSubtilis, product.gClausii] : [product.G], rules: product.rules || null };
+  if (!mes.length) return { feasible: false, reason: "Thêm ít nhất 1 mẻ.", maxOng: null };
+  // share = true ("pha ghép mẻ"): 1 chai được chia cho nhiều mẻ — mẻ sau chỉ còn phần chai mẻ trước chưa dùng.
+  // share = false ("pha đủ mẻ"): chai nào thuộc mẻ nào thì dùng hết ở mẻ đó, không chai nào xuất hiện ở 2 mẻ.
+  const seen = new Set();
+  const usedRaw = {};
+  const results = [];
+  for (let i = 0; i < mes.length; i++) {
+    const meIn = share
+      ? { ...mes[i], lots: mes[i].lots.map((ls) => ls.map((l) => ({ ...l, F: l.F - (usedRaw[l.maLo] || 0) })).filter((l) => l.F > 1e-6)) }
+      : mes[i];
+    const r = calcManualMe(meIn, cfg);
+    if (!r.ok) return { feasible: false, reason: `Mẻ ${i + 1}: ${r.reason}`, maxOng: null };
+    for (const st of r.streams) for (const x of st) {
+      if (share) { usedRaw[x.lot.maLo] = (usedRaw[x.lot.maLo] || 0) + x.raw; continue; }
+      if (seen.has(x.lot.maLo)) return { feasible: false, reason: `Chai ${x.lot.maLo} được gán cho nhiều mẻ — mỗi chai chỉ thuộc 1 mẻ (hoặc chọn "Pha ghép mẻ").`, maxOng: null };
+      seen.add(x.lot.maLo);
+    }
+    results.push(r);
+  }
+  const entriesOf = (st) => st.map((x) => ({ maLo: x.lot.maLo, E: x.lot.E, theTichRaw: x.raw, loSanXuat: x.lot.loSanXuat }));
+  const vSum = results.reduce((sum, r) => sum + r.V, 0);
+  const T = Math.floor((vSum * 1000) / H);
+  const fixedDensity = mes.some((m) => m.lockD);
+
+  if (two) {
+    const batches = results.map((r, i) => ({ meSo: i + 1, tongTheTich: r.V, subtilis: entriesOf(r.streams[0]), clausii: entriesOf(r.streams[1]) }));
+    recomputeLoSanXuatMeta(batches);
+    const usedS = usedOf(batches, "subtilis"), usedC = usedOf(batches, "clausii");
+    const dSubtilis = usedS.reduce((sum, l) => sum + l.E * l.F, 0) / vSum;
+    const dClausii = usedC.reduce((sum, l) => sum + l.E * l.F, 0) / vSum;
+    return {
+      feasible: true, manual: true, fixedDensity, T, totalV: vSum, dSubtilis, dClausii,
+      selectedSubtilisLots: usedS.map((l) => l.maLo), selectedClausiiLots: usedC.map((l) => l.maLo),
+      batches,
+      massBalanceSubtilis: checkMassBalance(usedS, dSubtilis, T, H),
+      massBalanceClausii: checkMassBalance(usedC, dClausii, T, H),
+      subtilisShortfallLot: null,
+    };
+  }
+  const batches = results.map((r, i) => {
+    const st = r.streams[0];
+    const cfuM = st.reduce((sum, x) => sum + x.lot.E * x.raw, 0);
+    const loList = Array.from(new Set(st.map((x) => loSanXuatOf(x.lot))));
+    return {
+      meSo: i + 1, tongTheTich: r.V, tronLoSanXuat: loList.length > 1, loSanXuatList: loList,
+      lots: st.map((x) => {
+        const theTichDich = (r.V * x.lot.E * x.raw) / cfuM;
+        return { maLo: x.lot.maLo, E: x.lot.E, theTichRaw: x.raw, theTichDich, soOng: (theTichDich * 1000) / H, loSanXuat: x.lot.loSanXuat };
+      }),
+    };
+  });
+  const used = usedOf(batches.map((b) => ({ subtilis: b.lots })), "subtilis");
+  const cfuUsed = used.reduce((sum, l) => sum + l.E * l.F, 0);
+  const d = cfuUsed / vSum;
+  return {
+    feasible: true, manual: true, fixedDensity, d, T, S: cfuUsed * 1000, totalV: vSum, wholeBottleOnly: false,
+    selectedLots: used.map((l) => l.maLo), batches, massBalance: checkMassBalance(used, d, T, H),
+  };
+}
+
+const usedOf = (batches, key) => {
+  const byLo = {};
+  batches.forEach((b) => b[key].forEach((e) => {
+    const cur = byLo[e.maLo] || (byLo[e.maLo] = { maLo: e.maLo, E: e.E, F: 0, loSanXuat: e.loSanXuat });
+    cur.F += e.theTichRaw;
+  }));
+  return Object.values(byLo);
+};
 
 // ---------------------------------------------------------------------------
 // KIỂM TRA ĐỀ XUẤT GHÉP LÔ TỪ NGUỒN NGOÀI (vd AI) — SP 2 THÀNH PHẦN

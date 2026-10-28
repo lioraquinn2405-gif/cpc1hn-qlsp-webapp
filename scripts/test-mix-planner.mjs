@@ -752,5 +752,46 @@ function EPStest() {
   return 1e-3; // dung sai số học khi so sánh dấu chấm động trong test
 }
 
+console.log("\n=== 22. planSingleComponent với quy tắc mẻ riêng (Baciforte: ≤2000L, ≥1000L, ≤3 chai, cùng 1 lô) ===");
+{
+  const lots = [];
+  const Es = [3.4e10, 3.3e10, 3.45e10, 3.2e10, 3.5e10, 3.38e10];
+  ["A", "B", "C"].forEach((lo, li) => Es.forEach((E, i) => lots.push({ maLo: `${lo}.C${i + 1}`, E: E * (1 + li * 0.01), F: 10, loSanXuat: lo, thoiGianThu: `2026-0${li + 1}-01` })));
+  const rules = { maxV: 2000, minV: 1000, maxLots: 3, oneLo: true, wholeBottle: true, goodMin: 1300, goodMax: 1700 };
+  const plan = planSingleComponent({ lots, product: { N: 2_000_000, G: 4e8, H: 5 }, batchRules: rules });
+  check("feasible = true", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
+    check("mọi mẻ ≤ 2000L", plan.batches.every((b) => b.tongTheTich <= 2000 + 1e-6), JSON.stringify(plan.batches.map((b) => b.tongTheTich)));
+    check("không mẻ nào dưới 1000L", plan.batches.every((b) => b.tongTheTich >= 1000 - 1e-6));
+    check("mỗi mẻ ≤ 3 chai", plan.batches.every((b) => b.lots.length <= 3));
+    check("mỗi mẻ chỉ 1 lô sản xuất", plan.batches.every((b) => !b.tronLoSanXuat && b.loSanXuatList.length === 1));
+    const usedF = {};
+    plan.batches.forEach((b) => b.lots.forEach((l) => { usedF[l.maLo] = (usedF[l.maLo] || 0) + l.theTichRaw; }));
+    check("mọi chai đã dùng đều dùng hết 100%", Object.entries(usedF).every(([m, f]) => Math.abs(f - 10) < 1e-6), JSON.stringify(usedF));
+    check("mọi lần đong tròn 0.5L", plan.batches.every((b) => b.lots.every((l) => Math.abs(l.theTichRaw / 0.5 - Math.round(l.theTichRaw / 0.5)) < 1e-9)));
+    check("mỗi chai chỉ nằm trong 1 mẻ (không chia dở)", Object.keys(usedF).every((m) => plan.batches.filter((b) => b.lots.some((l) => l.maLo === m)).length === 1));
+    check("chai để lại không xuất hiện trong mẻ nào", (plan.leftoverLots || []).every((m) => !(m in usedF)));
+    console.log("  -> mẻ: " + plan.batches.map((b) => fmt(b.tongTheTich, 0) + "L/" + b.lots.length + " chai").join(" | "));
+  }
+}
+
+console.log("\n=== 23. Baciforte: ít mẻ nhất — ghép 3 chai/mẻ, chai lẻ để lại pha sản phẩm khác ===");
+{
+  // 2 lô × 7 chai, mỗi chai pha ~500L (≈1500L / 3 chai). N ~ 4 mẻ × 1500L.
+  const mkLots = (lo, n) => Array.from({ length: n }, (_, i) => ({ maLo: `${lo}.C${i + 1}`, E: 4.25e10, F: 10, loSanXuat: lo, thoiGianThu: "2026-01-01" }));
+  const lots = [...mkLots("L1", 7), ...mkLots("L2", 7)];
+  const rules = { maxV: 2000, minV: 1000, maxLots: 3, oneLo: true, wholeBottle: true, goodMin: 1300, goodMax: 1700 };
+  const plan = planSingleComponent({ lots, product: { N: 1_150_000, G: 8.5e8, H: 5.2 }, batchRules: rules });
+  check("feasible", plan.feasible === true, plan.reason || "");
+  if (plan.feasible) {
+    console.log("  -> mẻ: " + plan.batches.map((b) => fmt(b.tongTheTich, 0) + "L/" + b.lots.length + " chai").join(" | ") + " | để lại: " + (plan.leftoverLots || []).join(","));
+    check("đúng 4 mẻ (ít nhất để đạt ~N)", plan.batches.length === 4, String(plan.batches.length));
+    check("mọi mẻ đều 3 chai", plan.batches.every((b) => b.lots.length === 3));
+    check("không mẻ nào trộn lô, ≤2000L, ≥1000L", plan.batches.every((b) => !b.tronLoSanXuat && b.tongTheTich <= 2000 && b.tongTheTich >= 1000));
+    check("sản lượng 95–115% N", plan.T >= 0.95 * 1_150_000 && plan.T <= 1.15 * 1_150_000, String(plan.T));
+    check("chai lẻ để lại ≥ 1", (plan.leftoverLots || []).length >= 1);
+  }
+}
+
 console.log(`\n=== KẾT QUẢ: ${passCount} PASS / ${failCount} FAIL ===`);
 if (failCount > 0) process.exit(1);
